@@ -1,5 +1,5 @@
 import re
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 from datetime import date
