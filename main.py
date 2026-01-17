@@ -18,14 +18,14 @@ session.headers.update({
 
 URL_Boletin = settings.url_boletin
 textos = []
-debug = True
+debug = settings.is_debbug
 html = obtener_html(URL_Boletin)
 html2 = obtener_html_filtrado(settings.url_boletin_filtro,URL_Boletin, settings.fecha_ini, settings.fecha_fin)
 
-externos = extraer_externos(html2,True)
+externos = extraer_externos(html2,settings.is_debbug)
 print("HTML obtenido correctamente")
 
-#links = obtener_fechas_y_links_boletines(html, True)
+#links = obtener_fechas_y_links_boletines(html, settings.is_debbug)
 
 for fecha,l in externos:
     if not existe_procesamiento(fecha, l):

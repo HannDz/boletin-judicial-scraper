@@ -47,6 +47,7 @@ class Settings:
     url_boletin_filtro:str
     fecha_ini:str
     fecha_fin:str
+    is_debbug:bool
 
 def load_settings() -> Settings:
     return Settings(
@@ -63,6 +64,7 @@ def load_settings() -> Settings:
         url_boletin_filtro=get_env("URL_BOLETIN_FILTRO", "") or "",
         fecha_ini=get_env("FILTRADO_INI","") or "",
         fecha_fin=get_env("FILTRADO_FIN","") or "",
+        is_debbug=get_env("ISDEBBUG",False) or False,
     )
 
 settings = load_settings()
