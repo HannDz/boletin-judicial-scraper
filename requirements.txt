@@ -5,3 +5,7 @@ pdfplumber
 pytesseract
 pillow
 opencv-python
+requests
+python-dotenv
+SQLAlchemy
+psycopg[binary]
