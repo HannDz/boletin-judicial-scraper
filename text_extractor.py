@@ -242,3 +242,4 @@ def extract_from_full_text(full_text: str) -> List[Dict]:
                 results.append(r)
 
     return results
+

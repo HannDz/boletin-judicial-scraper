@@ -9,6 +9,7 @@ from images import *
 from configuration import settings
 from repository import *
 from text_extractor import *
+from text_pdf_extractor import *
 os.makedirs("tmp", exist_ok=True)
 
 session = crear_sesion()
@@ -31,42 +32,47 @@ for fecha,l in externos:
     if not existe_procesamiento(fecha, l):
         expedientes=[]
         direccion = extraer_url_redireccion(html = obtener_html(l))
-        html = requests.get(direccion).text
-        resultado = extraer_paginas_js(html)
-        contador = 1
-        fecha_pub: date | None = None 
-        num_boletin: int
-        for p in resultado:
-            html_thumb = session.get(p["thumb"]).text 
-            print(f"OCR página {html_thumb}")
-            if contador == 1 or contador < inicio_columnas:
-                texto = procesar_pagina(session, html_thumb, contador)
-            else:
-                texto = procesar_pagina_columna(session, html_thumb, contador)
-                expedientes.extend(parse_arrendamiento_block(texto, fecha_pub, num_boletin, contador+2))
-            if contador == 1:
-                inicio_columnas = obtener_inicio_columnas(texto)
-                fecha_pub , num_boletin = extraer_fecha_y_numero_boletin(texto)
+        if direccion != None:
+            html = requests.get(direccion).text
+            resultado = extraer_paginas_js(html)
+            contador = 1
+            fecha_pub: date | None = None 
+            num_boletin: int
+            for p in resultado:
+                html_thumb = session.get(p["thumb"]).text 
+                print(f"OCR página {html_thumb}")
+                if contador == 1:
+                    texto = procesar_pagina(session, html_thumb, contador)
+                    inicio_columnas = obtener_inicio_columnas(texto)
+                    fecha_pub , num_boletin = extraer_fecha_y_numero_boletin(texto)
+                elif inicio_columnas <= contador:
+                    texto = procesar_pagina_columna(session, html_thumb, contador)
+                    expedientes.extend(parse_arrendamiento_block(texto, fecha_pub, num_boletin, contador+2))
 
-            textos.append(texto)
+                textos.append(texto)
+                if debug:
+                    if contador == inicio_columnas+15:
+                        break
+                contador+=1
+            cantidad_insercion = insertar_expedientes_bulk(expedientes)
+
+            cont = 1
+            fecha_string = fecha.isoformat()
+
             if debug:
-                if contador == 15:
-                    break
-            contador+=1
-        cantidad_insercion = insertar_expedientes_bulk(expedientes)
-
-        cont = 1
-        fecha_string = fecha.isoformat()
-
-        if debug:
-            for cont, texto in enumerate(textos, start=1):
-                ruta_salida = f"revision_boletin{fecha_string}.txt"
-                guardar_texto_incremental(
-                    ruta_salida,
-                    texto,   
-                    cont     
-                )
-                cont +=1
+                for cont, texto in enumerate(textos, start=1):
+                    ruta_salida = f"revision_boletin{fecha_string}.txt"
+                    guardar_texto_incremental(
+                        ruta_salida,
+                        texto,   
+                        cont     
+                    )
+                    cont +=1
+        else:
+            direccion = extraer_pdf_source(html = obtener_html(l))
+            path_salida = descargar_pdf(direccion, f"boletin_{fecha.isoformat()}.pdf")
+            texto = extraer_texto_pypdf(path_salida)
+            expedientes.extend(parse_arrendamiento_salas_block_v2(texto, fecha.isoformat(), 38, 2))
 
         if cantidad_insercion > 0:
             insertar_procesamiento_boletin(
