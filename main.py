@@ -20,7 +20,7 @@ session.headers.update({
 URL_Boletin = settings.url_boletin
 textos = []
 debug = settings.is_debbug
-html = obtener_html(URL_Boletin)
+#html = obtener_html(URL_Boletin)
 html2 = obtener_html_filtrado(settings.url_boletin_filtro,URL_Boletin, settings.fecha_ini, settings.fecha_fin)
 
 externos = extraer_externos(html2,settings.is_debbug)
@@ -32,6 +32,7 @@ for fecha,l in externos:
     if not existe_procesamiento(fecha, l):
         expedientes=[]
         direccion = extraer_url_redireccion(html = obtener_html(l))
+        contador = 0
         if direccion != None:
             html = requests.get(direccion).text
             resultado = extraer_paginas_js(html)
@@ -49,30 +50,34 @@ for fecha,l in externos:
                     texto = procesar_pagina_columna(session, html_thumb, contador)
                     expedientes.extend(parse_arrendamiento_block(texto, fecha_pub, num_boletin, contador+2))
 
-                textos.append(texto)
                 if debug:
+                    textos.append(texto)
                     if contador == inicio_columnas+15:
                         break
                 contador+=1
-            cantidad_insercion = insertar_expedientes_bulk(expedientes)
-
-            cont = 1
-            fecha_string = fecha.isoformat()
-
-            if debug:
-                for cont, texto in enumerate(textos, start=1):
-                    ruta_salida = f"revision_boletin{fecha_string}.txt"
-                    guardar_texto_incremental(
-                        ruta_salida,
-                        texto,   
-                        cont     
-                    )
-                    cont +=1
         else:
             direccion = extraer_pdf_source(html = obtener_html(l))
             path_salida = descargar_pdf(direccion, f"boletin_{fecha.isoformat()}.pdf")
-            texto = extraer_texto_pypdf(path_salida)
+            texto = extraer_texto_pypdf_con_paginas(path_salida)
+            eliminar_pdf(path_salida) 
+            contador = extraer_total_paginas(texto)
             expedientes.extend(parse_arrendamiento_salas_block_v2(texto, fecha.isoformat(), 38, 2))
+        
+        cont = 1
+        fecha_string = fecha.isoformat()
+        if debug:
+            textos.append(texto)
+            for cont, texto in enumerate(textos, start=1):
+                ruta_salida = f"revision_boletin{fecha_string}.txt"
+                guardar_texto_incremental(
+                    ruta_salida,
+                    texto,   
+                    cont     
+                )
+                cont +=1
+        
+        if expedientes != None or len(expedientes) > 0:
+            cantidad_insercion = insertar_expedientes_bulk(expedientes)
 
         if cantidad_insercion > 0:
             insertar_procesamiento_boletin(

@@ -1,223 +1,8 @@
-# import re
-# import unicodedata
-# from typing import List, Dict, Optional
-# from pypdf import PdfReader
-# # --- Regex base ---
-# RE_VS = re.compile(r"\bvs\.?\b", re.IGNORECASE)
-
-# # Arrendamiento (abreviaturas y variantes)
-# RE_ARR = re.compile(r"\barrend(?:\.|amiento)?\b", re.IGNORECASE)
-
-# # Localiza el inicio del primer caso (línea que contiene "vs.")
-# RE_FIRST_CASE_LINE = re.compile(r"(?m)^[^\n]{1,220}\bvs\.?\b", re.IGNORECASE)
-
-# # Estatus al final: "2 Acdos.", "1 Acdo.", "1 Sent."
-# RE_STATUS = re.compile(r"\b(\d{1,3})\s*(acdos?|acdo|sent)\.?\b", re.IGNORECASE)
-
-# # Expediente completo: "T. 942-2019-003"
-# RE_EXP_FULL = re.compile(r"\bT\.\s*(\d{1,6})[-/](\d{4})[-/](\d{3})\b", re.IGNORECASE)
-
-# # Cola de expediente: "y 006" o ", 006" (mismo prefijo y año que el anterior)
-# RE_EXP_TAIL = re.compile(r"\b(?:y|,)\s*(\d{3})\b", re.IGNORECASE)
-
-# # Para encontrar el primer "T." en el resto y separar tipo_juicio
-# RE_T_DOT = re.compile(r"\bT\.\s*", re.IGNORECASE)
-
-
-# def _normalize(s: str) -> str:
-#     """Normaliza OCR: quita acentos, arregla comillas raras, espacios, saltos."""
-#     if not s:
-#         return ""
-#     # normaliza unicode (quita acentos)
-#     s = unicodedata.normalize("NFKD", s)
-#     s = "".join(c for c in s if not unicodedata.combining(c))
-
-#     # comillas tipográficas
-#     s = s.replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'")
-
-#     # unifica saltos/espacios
-#     s = s.replace("\r\n", "\n").replace("\r", "\n")
-#     s = re.sub(r"[ \t]+", " ", s)
-#     s = re.sub(r"\n{2,}", "\n", s)
-#     return s.strip()
-
-
-# def _strip_to_first_case(text: str) -> str:
-#     """Recorta encabezados: deja el texto a partir de la primera línea que contiene 'vs.'."""
-#     m = RE_FIRST_CASE_LINE.search(text)
-#     return text[m.start():] if m else text
-
-
-# def _clean_name(name: str) -> str:
-#     """Limpia nombres: compacta espacios y quita puntuación sobrante al final."""
-#     name = re.sub(r"\s+", " ", name).strip()
-#     name = name.strip(" .;:-")
-#     return name
-
-
-# def _extract_expedientes_sala(rest: str) -> List[str]:
-#     """
-#     Extrae expedientes del tipo:
-#     - T. 942-2019-003
-#     - T. 194-2019-005 y 006  -> genera 2 expedientes
-#     """
-#     exps: List[str] = []
-#     for m in RE_EXP_FULL.finditer(rest):
-#         num = m.group(1)
-#         anio = m.group(2)
-#         folio = m.group(3)
-#         exps.append(f"T. {num}-{anio}-{folio}")
-
-#         # busca "colas" cercanas: "y 006" / ", 006"
-#         tail_zone = rest[m.end(): m.end() + 60]  # ventana corta después del match
-#         for t in RE_EXP_TAIL.finditer(tail_zone):
-#             folio2 = t.group(1)
-#             exps.append(f"T. {num}-{anio}-{folio2}")
-
-#     # dedupe conservando orden
-#     seen = set()
-#     out = []
-#     for e in exps:
-#         if e not in seen:
-#             seen.add(e)
-#             out.append(e)
-#     return out
-
-
-# def parse_arrendamiento_salas_block(
-#     block: str,
-#     fecha_pub: str,
-#     num_boletin: int,
-#     num_pag: int
-# ) -> List[Dict]:
-#     """
-#     Parseo para texto tipo SALAS:
-#     - Encuentra casos por patrón "actor vs. demandado"
-#     - Dentro de cada caso: si contiene Arrend., extrae:
-#       actor, demandado, tipo_juicio (antes del primer T.), estatus, expedientes
-#     - Devuelve 1..N registros por expedientes
-#     """
-#     text = _normalize(block)
-#     if not text:
-#         return []
-
-#     text = _strip_to_first_case(text)
-
-#     # Si ni siquiera aparece arrendamiento en el bloque, corta rápido
-#     if not RE_ARR.search(text):
-#         return []
-
-#     # Divide por casos usando la siguiente heurística:
-#     # Tomamos cada "actor vs." y cortamos hasta antes del siguiente "actor vs."
-#     # Para eso, obtenemos los índices donde aparece " vs. " y usamos una búsqueda de "inicio de caso" por línea.
-#     starts = []
-#     for m in re.finditer(r"(?m)^[^\n]{1,220}\bvs\.?\b", text, flags=re.IGNORECASE):
-#         starts.append(m.start())
-
-#     # si no detecta inicios por línea, fallback: usa toda la cadena como un solo bloque-caso
-#     if not starts:
-#         starts = [0]
-
-#     # arma segmentos
-#     segments = []
-#     for i, st in enumerate(starts):
-#         en = starts[i + 1] if i + 1 < len(starts) else len(text)
-#         segments.append(text[st:en].strip())
-
-#     resultados: List[Dict] = []
-#     seen = set()
-
-#     for seg in segments:
-#         # Debe tener vs y arrendamiento
-#         if not RE_VS.search(seg) or not RE_ARR.search(seg):
-#             continue
-
-#         # 1) Split actor vs demandado+rest
-#         mvs = RE_VS.search(seg)
-#         if not mvs:
-#             continue
-
-#         actor_raw = seg[:mvs.start()]
-#         after_vs = seg[mvs.end():].strip()
-
-#         # Heurística: demandado termina cuando empieza el "tipo/expediente"
-#         # Buscamos el primer "T." (si no hay, no nos sirve)
-#         mt = RE_T_DOT.search(after_vs)
-#         if not mt:
-#             continue
-
-#         before_t = after_vs[:mt.start()].strip()
-#         rest_from_t = after_vs[mt.start():].strip()
-
-#         # De "before_t" queremos separar demandado y tipo_juicio.
-#         # En este formato, el tipo suele estar al final: "Controv. Arrend."
-#         # Tomamos como tipo la última frase que contiene Arrend..., y lo anterior es demandado.
-#         tipo_juicio: Optional[str] = None
-#         demandado_raw = before_t
-
-#         # intenta aislar tipo por última ocurrencia de "arrend"
-#         m_arr = list(RE_ARR.finditer(before_t))
-#         if m_arr:
-#             last = m_arr[-1]
-#             # toma desde unas palabras antes del arrend (para capturar "Controv. Arrend.")
-#             # buscamos el último punto antes de arrend, si existe
-#             left = before_t.rfind(".", 0, last.start())
-#             cut = left + 1 if left != -1 else max(0, last.start() - 20)
-#             tipo_candidate = before_t[cut:].strip()
-#             # si el candidato es muy corto, usa desde 0
-#             if len(tipo_candidate) < 8:
-#                 tipo_candidate = before_t.strip()
-
-#             # demandado es lo que queda antes
-#             demandado_part = before_t[:cut].strip(" .")
-#             if demandado_part:
-#                 demandado_raw = demandado_part
-#             tipo_juicio = tipo_candidate.strip(" .")
-
-#         actor = _clean_name(actor_raw)
-#         demandado = _clean_name(demandado_raw)
-
-#         # 2) Estatus (si existe)
-#         estatus = None
-#         num_estatus = None
-#         ms = RE_STATUS.search(seg)
-#         if ms:
-#             num_estatus = int(ms.group(1))
-#             st = ms.group(2).lower()
-#             estatus = "Sent" if st.startswith("sent") else "Acdo"
-
-#         # 3) Expedientes (desde el "T." hacia adelante)
-#         expedientes = _extract_expedientes_sala(rest_from_t)
-#         if not expedientes:
-#             continue
-
-#         # 4) Registros por expediente
-#         for exp in expedientes:
-#             reg = {
-#                 "id_expediente": exp,
-#                 "actor_demandante": actor or None,
-#                 "demandado": demandado or None,
-#                 "tipo_juicio": tipo_juicio,
-#                 "estatus": estatus,
-#                 "num_estatus": num_estatus,          # opcional (conteo)
-#                 "fecha_publicacion": fecha_pub,
-#                 "numero_boletin": num_boletin,
-#                 "numero_pagina": num_pag,
-#             }
-#             key = (
-#                 reg["id_expediente"], reg["actor_demandante"], reg["demandado"],
-#                 reg["tipo_juicio"], reg["estatus"], reg["numero_boletin"], reg["fecha_publicacion"]
-#             )
-#             if key not in seen:
-#                 seen.add(key)
-#                 resultados.append(reg)
-
-#     return resultados
-
 import re
 import unicodedata
 from typing import List, Dict, Optional
 from pypdf import PdfReader
+from pathlib import Path
 
 RE_VS = re.compile(r"\bvs\.?\b", re.IGNORECASE)
 RE_ARR = re.compile(r"\barrend(?:\.|amiento)?\b", re.IGNORECASE)
@@ -238,6 +23,60 @@ RE_TIPO_ARR = re.compile(
     r"(?P<tipo>(?:[A-Za-z]{2,20}\.\s*){0,4}Arrend(?:\.|amiento)?)",
     re.IGNORECASE
 )
+RE_PAGE_HDR = re.compile(r"\bPAGINA\s+(\d+)\s*/\s*(\d+)\b", re.IGNORECASE)
+
+RE_NUM_BOLETIN = re.compile(
+    r"\bBOLET[IÍ]N\s+JUDICIAL\s*(?:No\.?|N[úu]m\.?|Num\.?|N°|Nro\.?)\s*\.?\s*(\d{1,4})\b",
+    re.IGNORECASE
+)
+
+RE_SALA_CIVIL = re.compile(
+    r"\b(?P<sala>(?:PRIMERA|SEGUNDA|TERCERA|CUARTA|QUINTA|SEXTA|SEPTIMA|OCTAVA|NOVENA|DECIMA)\s+SALA\s+CIVIL)\b",
+    re.IGNORECASE
+)
+
+RE_PAGE_HDR = re.compile(r"\bPAGINA\s+(\d+)\s*/\s*(\d+)\b", re.IGNORECASE)
+
+def extraer_total_paginas(texto: str) -> Optional[int]:
+    matches = list(RE_PAGE_HDR.finditer(texto))
+    if not matches:
+        return None
+    return int(matches[-1].group(2))
+
+def _sala_civil_para_pos(text: str, pos: int) -> Optional[str]:
+    # 1) intenta dentro de la misma pagina (si existe PAGINA X/total)
+    page_start = 0
+    last_page = None
+    for m in RE_PAGE_HDR.finditer(text):   # RE_PAGE_HDR = r"\bPAGINA\s+(\d+)\s*/\s*(\d+)\b"
+        if m.start() <= pos:
+            last_page = m
+        else:
+            break
+    if last_page:
+        page_start = last_page.start()
+
+    seg = text[page_start:pos]
+    matches = list(RE_SALA_CIVIL.finditer(seg))
+    if matches:
+        return _clean_chunk(matches[-1].group("sala")).upper()
+
+    # 2) fallback: ventana hacia atrás (por si el encabezado de sala quedó en la página anterior)
+    window_start = max(0, pos - 12000)
+    seg2 = text[window_start:pos]
+    matches2 = list(RE_SALA_CIVIL.finditer(seg2))
+    return _clean_chunk(matches2[-1].group("sala")).upper() if matches2 else None
+
+def extraer_numero_boletin(texto: str) -> Optional[int]:
+    """
+    Devuelve el primer número de boletín encontrado, ej:
+    'BOLETÍN JUDICIAL No. 19' -> 19
+    """
+    m = RE_NUM_BOLETIN.search(texto)
+    return int(m.group(1)) if m else None
+
+def _extract_page_from_block(text: str) -> Optional[int]:
+    m = RE_PAGE_HDR.search(text)
+    return int(m.group(1)) if m else None
 
 def _normalize_keep_newlines(s: str) -> str:
     if not s:
@@ -277,11 +116,17 @@ def parse_arrendamiento_salas_block_v2(
     block: str,
     fecha_pub: str,
     num_boletin: int,
-    num_pag: int
+    num_pag: Optional[int] = None
 ) -> List[Dict]:
     text = _normalize_keep_newlines(block)
     if not text or not RE_ARR.search(text):
         return []
+
+    # ✅ obtiene página desde el texto agregado (PAGINA i/total)
+    page_from_text = _extract_page_from_block(text)
+    pagina_final = page_from_text if page_from_text is not None else num_pag
+    
+    num_boletin = extraer_numero_boletin(text)  # o texto de la primera página
 
     resultados: List[Dict] = []
     seen = set()
@@ -292,6 +137,9 @@ def parse_arrendamiento_salas_block_v2(
     # Para cada match de Arrend..., construimos un caso alrededor
     for arr_m in RE_ARR.finditer(text):
         arr_pos = arr_m.start()
+
+        pagina_caso = _pagina_para_pos(text, arr_pos) 
+        sala_civil = _sala_civil_para_pos(text, arr_pos)
 
         # 1) Encuentra el ÚLTIMO vs antes de Arrend
         vs_before = None
@@ -331,8 +179,8 @@ def parse_arrendamiento_salas_block_v2(
         if not mt:
             continue
 
-        before_t = _clean_chunk(resto[:mt.start()])     # demanda + tipo
-        from_t = resto[mt.start():]                    # desde T. en adelante
+        before_t = _clean_chunk(resto[:mt.start()])  # demanda + tipo
+        from_t = resto[mt.start():]                  # desde T. en adelante
 
         # 6) tipo_juicio = última ocurrencia de (algo.) Arrend... dentro de before_t
         tipo_juicio: Optional[str] = None
@@ -342,8 +190,6 @@ def parse_arrendamiento_salas_block_v2(
         if tipo_matches:
             tipo_m = tipo_matches[-1]
             tipo_juicio = _clean_chunk(tipo_m.group("tipo"))
-
-            # demandado es lo anterior al tipo (limpiando residuos de puntuación)
             demandado_raw = _clean_chunk(before_t[:tipo_m.start()])
 
         actor = _clean_chunk(actor_raw)
@@ -358,6 +204,7 @@ def parse_arrendamiento_salas_block_v2(
             num_estatus = int(st.group(1))
             stw = st.group(2).lower()
             estatus = "Sent" if stw.startswith("sent") else "Acdo"
+
 
         # 8) Expedientes
         expedientes = _extract_expedientes_sala(from_t)
@@ -374,11 +221,13 @@ def parse_arrendamiento_salas_block_v2(
                 "num_estatus": num_estatus,
                 "fecha_publicacion": fecha_pub,
                 "numero_boletin": num_boletin,
-                "numero_pagina": num_pag,
+                "numero_pagina": pagina_caso,  # ✅ aquí va la página detectada
+                "juzgado": sala_civil, 
             }
             key = (
                 reg["id_expediente"], reg["actor_demandante"], reg["demandado"],
-                reg["tipo_juicio"], reg["estatus"], reg["fecha_publicacion"], reg["numero_boletin"]
+                reg["tipo_juicio"], reg["estatus"], reg["fecha_publicacion"], reg["numero_boletin"],
+                reg["numero_pagina"], reg["juzgado"],
             )
             if key not in seen:
                 seen.add(key)
@@ -387,6 +236,47 @@ def parse_arrendamiento_salas_block_v2(
     return resultados
 
 
-def extraer_texto_pypdf(pdf_path: str) -> str:
+def extraer_texto_pypdf_con_paginas(pdf_path: str) -> str:
     reader = PdfReader(pdf_path)
-    return "\n".join((page.extract_text() or "") for page in reader.pages)
+    total = len(reader.pages)
+
+    partes = []
+    paginas_con_texto = 0
+
+    for i, page in enumerate(reader.pages, start=1):
+        texto_pag = (page.extract_text() or "").strip()
+        if texto_pag:
+            paginas_con_texto += 1
+
+        partes.append(
+            f"\n{'='*80}\nPAGINA {i+2}/{total+2}\n{'='*80}\n{texto_pag}\n"
+        )
+
+    partes.append(
+        f"\n{'='*80}\nRESUMEN\n{'='*80}\n"
+        f"Paginas totales: {total}\n"
+        f"Paginas con texto: {paginas_con_texto}\n"
+    )
+
+    return "".join(partes)
+
+RE_PAGE_HDR = re.compile(r"\bPAGINA\s+(\d+)\s*/\s*(\d+)\b", re.IGNORECASE)
+
+def _pagina_para_pos(text: str, pos: int) -> Optional[int]:
+    """
+    Devuelve el número de página (PAGINA X/...) cuya cabecera está más cercana ANTES de 'pos'.
+    """
+    last = None
+    for m in RE_PAGE_HDR.finditer(text):
+        if m.start() <= pos:
+            last = m
+        else:
+            break
+    return int(last.group(1)) if last else None
+
+def eliminar_pdf(pdf_path: str) -> bool:
+    p = Path(pdf_path)
+    if p.exists():
+        p.unlink()   # borra el archivo
+        return True
+    return False
