@@ -53,6 +53,59 @@ RE_CASE_TERMINATOR = re.compile(
 RE_EXP_HYPH = re.compile(r"\b\d{1,6}[-/]\d{4}[-/]\d{3}\b")  # 171-2017-006, 804-2019-001
 RE_TAIL_MARKERS = re.compile(r"\b(?:Cuad\.|Amp\.|Acdos?|Acdo|Sent\.?|Pon\.?)\b", re.IGNORECASE)
 
+import re
+
+RE_SEPARADOR = re.compile(r"=+\s*", re.IGNORECASE)
+RE_PAGINA_HDR = re.compile(r"\bPAGINA\s+\d+\s*/\s*\d+\b", re.IGNORECASE)
+RE_SOLO_CONSULTA = re.compile(r"(?:\bSOLO\s+CONSULTA\b[\s]*){1,}", re.IGNORECASE)
+
+# Encabezados frecuentes (ajusta si tu OCR varía)
+RE_BOLETIN_HDR = re.compile(r"\bBOLETIN\s+JUDICIAL\s+No\.?\s*\d+\b", re.IGNORECASE)
+RE_FECHA_LARGA = re.compile(
+    r"\b(?:Lunes|Martes|Miercoles|Mi[eé]rcoles|Jueves|Viernes|Sabado|S[áa]bado|Domingo)\s+\d{1,2}\s+de\s+[A-Za-záéíóúñ]+\s+del?\s+\d{4}\b",
+    re.IGNORECASE
+)
+
+def limpiar_ruido_boletin(texto: str) -> str:
+    """
+    Quita marcas de agua/encabezados comunes que contaminan el parseo.
+    Mantiene el contenido (nombres/casos) lo más intacto posible.
+    """
+    if not texto:
+        return texto
+
+    # 1) Normaliza separadores gigantes tipo ========
+    texto = RE_SEPARADOR.sub(" ", texto)
+
+    # 2) Quita PAGINA X/Y
+    texto = RE_PAGINA_HDR.sub(" ", texto)
+
+    # 3) Quita SOLO CONSULTA repetido
+    texto = RE_SOLO_CONSULTA.sub(" ", texto)
+
+    # 4) Quita encabezado BOLETIN JUDICIAL No. N (si aparece pegado al texto)
+    texto = RE_BOLETIN_HDR.sub(" ", texto)
+
+    # 5) Quita fecha larga de encabezado (si aparece pegada al texto)
+    texto = RE_FECHA_LARGA.sub(" ", texto)
+
+    # 6) Limpieza línea a línea: elimina líneas que quedaron vacías o muy “header”
+    lineas = []
+    for ln in texto.splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        # elimina líneas que sean solo números (ej. "50")
+        if re.fullmatch(r"\d{1,4}", s):
+            continue
+        # elimina líneas tipo "Salas" aisladas
+        if s.lower() in {"salas", "sala"}:
+            continue
+        lineas.append(s)
+
+    # 7) Reconstruye
+    return "\n".join(lineas)
+
 def _case_start_before_vs(text: str, vs_start: int) -> int:
     """
     Busca el ÚLTIMO terminador de caso antes del vs.
@@ -170,6 +223,11 @@ def _is_header_line(line: str) -> bool:
         return True
     return False
 
+RE_EXP_PARTIDO = re.compile(r"(\b\d{1,6}-\d{4})-\s*\n\s*(\d{3}\b)")
+
+def unir_expedientes_partidos(text: str) -> str:
+    # 803-2019-\n002  -> 803-2019-002
+    return RE_EXP_PARTIDO.sub(r"\1-\2", text)
 
 # def _case_start_from_vs(text: str, vs_start: int) -> int:
 #     # inicio de la línea donde está el vs
@@ -414,6 +472,232 @@ def _case_end_from_vs(text: str, case_start: int, vs_start: int) -> int:
 
 #     return resultados
 
+# def parse_arrendamiento_salas_block_v2(
+#     block: str,
+#     fecha_pub: str,
+#     num_boletin: int,
+#     num_pag: Optional[int] = None
+# ) -> List[Dict]:
+#     text = _normalize_keep_newlines(block)
+#     if not text or not RE_ARR.search(text):
+#         return []
+
+#     # página del bloque (si tu bloque es de una sola página)
+#     page_from_text = _extract_page_from_block(text)
+#     pagina_final = page_from_text if page_from_text is not None else num_pag
+
+#     # ✅ NO sobre-escribas num_boletin si en este bloque no viene el header
+#     b = extraer_numero_boletin(text)
+#     if b is not None:
+#         num_boletin = b
+
+#     resultados: List[Dict] = []
+#     seen = set()
+
+#     # Para cada ocurrencia de Arrend...
+#     for arr_m in RE_ARR.finditer(text):
+#         arr_pos = arr_m.start()
+
+#         pagina_caso = _pagina_para_pos(text, arr_pos)
+#         sala_civil = _sala_civil_para_pos(text, arr_pos)
+
+#         # vs más cercano antes del Arrend
+#         vs_list = list(RE_VS.finditer(text, 0, arr_pos))
+#         if not vs_list:
+#             continue
+#         vs_m = vs_list[-1]
+
+#         # ✅ NUEVOS límites del caso
+#         #case_start = _case_start_from_vs(text, vs_m.start())
+#         case_start = _case_start_before_vs(text, vs_m.start())
+
+#         case_end = _case_end_from_vs(text, case_start, vs_m.start())
+
+#         caso = text[case_start:case_end].strip()
+#         if not (RE_VS.search(caso) and RE_ARR.search(caso)):
+#             continue
+
+#         # Separar actor vs resto
+#         mvs = RE_VS.search(caso)
+#         actor_raw = caso[:mvs.start()]
+#         resto = caso[mvs.end():]
+
+#         # Ubicar primer T.
+#         mt = RE_T_DOT.search(resto)
+#         if not mt:
+#             continue
+
+#         before_t = _clean_chunk(resto[:mt.start()])  # demandado + tipo
+#         from_t = resto[mt.start():]
+
+#         # Tipo/demandado (Controv. Arrend.)
+#         tipo_juicio: Optional[str] = None
+#         demandado_raw = before_t
+
+#         tipo_matches = list(RE_TIPO_ARR.finditer(before_t))
+#         if tipo_matches:
+#             tipo_m = tipo_matches[-1]
+#             tipo_juicio = _clean_chunk(tipo_m.group("tipo"))
+#             demandado_raw = _clean_chunk(before_t[:tipo_m.start()])
+
+#         #actor = _clean_chunk(actor_raw)
+#         actor = _clean_actor_near_vs(actor_raw)
+#         demandado = demandado_raw or None
+
+#         # ✅ Estatus robusto (Sent. o N Acdos.)
+#         estatus = None
+#         num_estatus = None
+#         # si hay "Sent." en el caso, es Sent
+#         if re.search(r"\bSent\.\b", caso, flags=re.IGNORECASE):
+#             estatus = "Sent"
+#         else:
+#             m_acdo = re.search(r"\b(\d{1,3})\s*(acdos?|acdo)\.?\b", caso, flags=re.IGNORECASE)
+#             if m_acdo:
+#                 num_estatus = int(m_acdo.group(1))
+#                 estatus = "Acdo"
+
+#         expedientes = _extract_expedientes_sala(from_t)
+#         if not expedientes:
+#             continue
+
+#         for exp in expedientes:
+#             reg = {
+#                 "id_expediente": exp,
+#                 "actor_demandante": actor or None,
+#                 "demandado": demandado,
+#                 "tipo_juicio": tipo_juicio,
+#                 "estatus": estatus,
+#                 "num_estatus": num_estatus,
+#                 "fecha_publicacion": fecha_pub,
+#                 "numero_boletin": num_boletin,
+#                 "numero_pagina": pagina_caso if pagina_caso is not None else pagina_final,
+#                 "juzgado": sala_civil,
+#             }
+
+#             key = (
+#                 reg["id_expediente"], reg["actor_demandante"], reg["demandado"],
+#                 reg["tipo_juicio"], reg["estatus"], reg["fecha_publicacion"], reg["numero_boletin"],
+#                 reg["numero_pagina"], reg["juzgado"],
+#             )
+#             if key not in seen:
+#                 seen.add(key)
+#                 resultados.append(reg)
+
+#     return resultados
+
+# def parse_arrendamiento_salas_block_v2(
+#     block: str,
+#     fecha_pub: str,
+#     num_boletin: int,
+#     num_pag: Optional[int] = None
+# ) -> List[Dict]:
+#     text = _normalize_keep_newlines(block)
+#     if not text or not RE_ARR.search(text):
+#         return []
+
+#     # página del bloque (si tu bloque es de una sola página)
+#     page_from_text = _extract_page_from_block(text)
+#     pagina_final = page_from_text if page_from_text is not None else num_pag
+
+#     # ✅ NO sobre-escribas num_boletin si en este bloque no viene el header
+#     b = extraer_numero_boletin(text)
+#     if b is not None:
+#         num_boletin = b
+
+#     resultados: List[Dict] = []
+#     seen = set()
+
+#     # Para cada ocurrencia de Arrend...
+#     for arr_m in RE_ARR.finditer(text):
+#         arr_pos = arr_m.start()
+
+#         pagina_caso = _pagina_para_pos(text, arr_pos)
+#         sala_civil = _sala_civil_para_pos(text, arr_pos)
+
+#         # vs más cercano antes del Arrend
+#         vs_list = list(RE_VS.finditer(text, 0, arr_pos))
+#         if not vs_list:
+#             continue
+#         vs_m = vs_list[-1]
+
+#         # ✅ NUEVOS límites del caso
+#         #case_start = _case_start_from_vs(text, vs_m.start())
+#         case_start = _case_start_before_vs(text, vs_m.start())
+
+#         case_end = _case_end_from_vs(text, case_start, vs_m.start())
+
+#         caso = text[case_start:case_end].strip()
+#         if not (RE_VS.search(caso) and RE_ARR.search(caso)):
+#             continue
+
+#         # Separar actor vs resto
+#         mvs = RE_VS.search(caso)
+#         actor_raw = caso[:mvs.start()]
+#         resto = caso[mvs.end():]
+
+#         # Ubicar primer T.
+#         mt = RE_T_DOT.search(resto)
+#         if not mt:
+#             continue
+
+#         before_t = _clean_chunk(resto[:mt.start()])  # demandado + tipo
+#         from_t = resto[mt.start():]
+
+#         # Tipo/demandado (Controv. Arrend.)
+#         tipo_juicio: Optional[str] = None
+#         demandado_raw = before_t
+
+#         tipo_matches = list(RE_TIPO_ARR.finditer(before_t))
+#         if tipo_matches:
+#             tipo_m = tipo_matches[-1]
+#             tipo_juicio = _clean_chunk(tipo_m.group("tipo"))
+#             demandado_raw = _clean_chunk(before_t[:tipo_m.start()])
+
+#         #actor = _clean_chunk(actor_raw)
+#         actor = _clean_actor_near_vs(actor_raw)
+#         demandado = demandado_raw or None
+
+#         # ✅ Estatus robusto (Sent. o N Acdos.)
+#         estatus = None
+#         num_estatus = None
+#         # si hay "Sent." en el caso, es Sent
+#         if re.search(r"\bSent\.\b", caso, flags=re.IGNORECASE):
+#             estatus = "Sent"
+#         else:
+#             m_acdo = re.search(r"\b(\d{1,3})\s*(acdos?|acdo)\.?\b", caso, flags=re.IGNORECASE)
+#             if m_acdo:
+#                 num_estatus = int(m_acdo.group(1))
+#                 estatus = "Acdo"
+
+#         expedientes = _extract_expedientes_sala(from_t)
+#         if not expedientes:
+#             continue
+
+#         for exp in expedientes:
+#             reg = {
+#                 "id_expediente": exp,
+#                 "actor_demandante": actor or None,
+#                 "demandado": demandado,
+#                 "tipo_juicio": tipo_juicio,
+#                 "estatus": estatus,
+#                 "num_estatus": num_estatus,
+#                 "fecha_publicacion": fecha_pub,
+#                 "numero_boletin": num_boletin,
+#                 "numero_pagina": pagina_caso if pagina_caso is not None else pagina_final,
+#                 "juzgado": sala_civil,
+#             }
+
+#             key = (
+#                 reg["id_expediente"], reg["actor_demandante"], reg["demandado"],
+#                 reg["tipo_juicio"], reg["estatus"], reg["fecha_publicacion"], reg["numero_boletin"],
+#                 reg["numero_pagina"], reg["juzgado"],
+#             )
+#             if key not in seen:
+#                 seen.add(key)
+#                 resultados.append(reg)
+
+#     return resultados
+
 def parse_arrendamiento_salas_block_v2(
     block: str,
     fecha_pub: str,
@@ -421,14 +705,19 @@ def parse_arrendamiento_salas_block_v2(
     num_pag: Optional[int] = None
 ) -> List[Dict]:
     text = _normalize_keep_newlines(block)
-    if not text or not RE_ARR.search(text):
+    text = unir_expedientes_partidos(text)
+    if not text:
         return []
 
-    # página del bloque (si tu bloque es de una sola página)
+    # Si no existe ninguna referencia a Arrend en el bloque, salimos
+    if not RE_ARR.search(text):
+        return []
+
+    # Página del bloque (si el bloque trae el header PAGINA X/Y)
     page_from_text = _extract_page_from_block(text)
     pagina_final = page_from_text if page_from_text is not None else num_pag
 
-    # ✅ NO sobre-escribas num_boletin si en este bloque no viene el header
+    # No sobre-escribir num_boletin si aquí no viene el header
     b = extraer_numero_boletin(text)
     if b is not None:
         num_boletin = b
@@ -447,49 +736,83 @@ def parse_arrendamiento_salas_block_v2(
         vs_list = list(RE_VS.finditer(text, 0, arr_pos))
         if not vs_list:
             continue
-        vs_m = vs_list[-1]
+        vs_m = vs_list[-1]  # ESTE es el vs "correcto" para esta ocurrencia de Arrend
 
-        # ✅ NUEVOS límites del caso
-        #case_start = _case_start_from_vs(text, vs_m.start())
+        # Límites del caso (tus helpers)
         case_start = _case_start_before_vs(text, vs_m.start())
-
         case_end = _case_end_from_vs(text, case_start, vs_m.start())
 
+        # Segmento "caso"
         caso = text[case_start:case_end].strip()
-        if not (RE_VS.search(caso) and RE_ARR.search(caso)):
+        if not caso:
             continue
 
-        # Separar actor vs resto
-        mvs = RE_VS.search(caso)
-        actor_raw = caso[:mvs.start()]
-        resto = caso[mvs.end():]
+        # Debe contener Arrend (aunque sea por ruido, doble check)
+        if not RE_ARR.search(caso):
+            continue
+
+        # ✅ Partir actor/resto usando el vs_m real (NO usando RE_VS.search(caso))
+        vs_rel_start = vs_m.start() - case_start
+        vs_rel_end = vs_m.end() - case_start
+
+        # Seguridad por si los offsets no caen dentro del segmento
+        if vs_rel_start < 0 or vs_rel_end > len(caso):
+            continue
+
+        actor_raw = caso[:vs_rel_start]
+        resto = caso[vs_rel_end:]
 
         # Ubicar primer T.
         mt = RE_T_DOT.search(resto)
         if not mt:
             continue
 
-        before_t = _clean_chunk(resto[:mt.start()])  # demandado + tipo
-        from_t = resto[mt.start():]
+        # ✅ VALIDACIÓN CLAVE:
+        # Arrend debe ocurrir ENTRE el vs (vs_rel_end) y el primer T. de este caso.
+        arr_rel = arr_pos - case_start                      # posición de Arrend dentro de `caso`
+        t_rel = vs_rel_end + mt.start()                     # posición de T. dentro de `caso`
+        if not (vs_rel_end < arr_rel < t_rel):
+            # Si no se cumple, significa que este vs/T son de otro caso (ej. Ejec. Merc.)
+            continue
+
+        before_t = _clean_chunk(resto[:mt.start()])         # demandado + tipo
+        from_t = resto[mt.start():]                         # desde T. en adelante
+
+        # ✅ Otra validación: Arrend debe estar ANTES del T. en el tramo previo
+        if not RE_ARR.search(before_t):
+            continue
 
         # Tipo/demandado (Controv. Arrend.)
         tipo_juicio: Optional[str] = None
         demandado_raw = before_t
 
+        tipo_m = None
         tipo_matches = list(RE_TIPO_ARR.finditer(before_t))
         if tipo_matches:
             tipo_m = tipo_matches[-1]
-            tipo_juicio = _clean_chunk(tipo_m.group("tipo"))
-            demandado_raw = _clean_chunk(before_t[:tipo_m.start()])
 
-        #actor = _clean_chunk(actor_raw)
+        if tipo_m:
+            # Si tu RE_TIPO_ARR trae grupo (?P<tipo>...), úsalo; si no, usa group(0)
+            try:
+                tipo_juicio = _clean_chunk(tipo_m.group("tipo"))
+            except Exception:
+                tipo_juicio = _clean_chunk(tipo_m.group(0))
+
+            demandado_raw = _clean_chunk(before_t[:tipo_m.start()])
+        else:
+            # Fallback: si hay Arrend pero OCR dañó el match del tipo
+            tipo_juicio = "Arrend"
+            m_arr = RE_ARR.search(before_t)
+            if m_arr:
+                demandado_raw = _clean_chunk(before_t[:m_arr.start()])
+
         actor = _clean_actor_near_vs(actor_raw)
         demandado = demandado_raw or None
 
-        # ✅ Estatus robusto (Sent. o N Acdos.)
+        # Estatus: Sent. o N Acdos.
         estatus = None
         num_estatus = None
-        # si hay "Sent." en el caso, es Sent
+
         if re.search(r"\bSent\.\b", caso, flags=re.IGNORECASE):
             estatus = "Sent"
         else:
@@ -498,6 +821,7 @@ def parse_arrendamiento_salas_block_v2(
                 num_estatus = int(m_acdo.group(1))
                 estatus = "Acdo"
 
+        # Expedientes (solo de este caso, desde T. en adelante)
         expedientes = _extract_expedientes_sala(from_t)
         if not expedientes:
             continue

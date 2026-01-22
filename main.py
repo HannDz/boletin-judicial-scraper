@@ -61,7 +61,8 @@ for fecha,l in externos:
             texto = extraer_texto_pypdf_con_paginas(path_salida)
             eliminar_pdf(path_salida) 
             contador = extraer_total_paginas(texto)
-            expedientes.extend(parse_arrendamiento_salas_block_v2(texto, fecha.isoformat(), 38, 2))
+            texto_limpio = limpiar_ruido_boletin(texto)
+            expedientes.extend(parse_arrendamiento_salas_block_v2(texto_limpio, fecha.isoformat(), 38, 2))
         
         cont = 1
         fecha_string = fecha.isoformat()
