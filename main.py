@@ -27,6 +27,7 @@ externos = extraer_externos(html2,settings.is_debbug)
 print("HTML obtenido correctamente")
 
 #links = obtener_fechas_y_links_boletines(html, settings.is_debbug)
+state = ParserState()
 
 for fecha,l in externos:
     if not existe_procesamiento(fecha, l):
@@ -48,7 +49,8 @@ for fecha,l in externos:
                     fecha_pub , num_boletin = extraer_fecha_y_numero_boletin(texto)
                 elif inicio_columnas <= contador:
                     texto = procesar_pagina_columna(session, html_thumb, contador)
-                    expedientes.extend(parse_arrendamiento_block(texto, fecha_pub, num_boletin, contador+2))
+                    #expedientes.extend(parse_arrendamiento_block(texto, fecha_pub, num_boletin, contador+2))
+                    expedientes.extend(parse_arrendamiento_block(texto, fecha_pub, num_boletin, contador + 2, state))
 
                 if debug:
                     textos.append(texto)
@@ -63,7 +65,6 @@ for fecha,l in externos:
             contador = extraer_total_paginas(texto)
             texto_limpio = limpiar_ruido_boletin(texto)
             expedientes.extend(parse_arrendamiento_salas_block_v2(texto_limpio, fecha.isoformat(), 38, 2))
-        
         cont = 1
         fecha_string = fecha.isoformat()
         if debug:

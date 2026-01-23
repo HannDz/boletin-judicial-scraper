@@ -77,13 +77,25 @@ def existe_procesamiento(fecha_boletin: date, url_boletin: str) -> bool:
     with engine.connect() as conn:
         return conn.execute(sql, {"fecha": fecha_boletin, "url": url_boletin}).first() is not None
 
+# SQL_INSERT_EXPEDIENTES = text("""
+# insert into expedientes (
+#   id_expediente, actor_demandante, demandado, tipo_juicio,
+#   fecha_publicacion,
+#   numero_boletin, numero_pagina, estatus
+# ) values (
+#   :id_expediente, :actor_demandante, :demandado, :tipo_juicio,
+#   :fecha_publicacion,
+#   :numero_boletin, :numero_pagina, :estatus
+# );
+# """)
+
 SQL_INSERT_EXPEDIENTES = text("""
 insert into expedientes (
-  id_expediente, actor_demandante, demandado, tipo_juicio,
+  id_expediente, juzgado, actor_demandante, demandado, tipo_juicio,
   fecha_publicacion,
   numero_boletin, numero_pagina, estatus
 ) values (
-  :id_expediente, :actor_demandante, :demandado, :tipo_juicio,
+  :id_expediente, :juzgado, :actor_demandante, :demandado, :tipo_juicio,
   :fecha_publicacion,
   :numero_boletin, :numero_pagina, :estatus
 );
@@ -106,13 +118,6 @@ CAMPOS_EXPEDIENTE = [
 def normalizar_registro(reg: dict) -> dict:
     # crea un dict con todas las llaves esperadas
     return {k: reg.get(k) for k in CAMPOS_EXPEDIENTE}
-
-# def insertar_expedientes_bulk(registros: list[dict], batch_size: int = 1000):
-#     registros_norm = [normalizar_registro(r) for r in registros]
-
-#     with engine.begin() as conn:
-#         for i in range(0, len(registros_norm), batch_size):
-#             conn.execute(SQL_INSERT_EXPEDIENTES, registros_norm[i:i+batch_size])
 
 def insertar_expedientes_bulk(registros: list[dict], batch_size: int = 1000) -> int:
     registros_norm = [normalizar_registro(r) for r in registros]
