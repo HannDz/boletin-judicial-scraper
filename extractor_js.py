@@ -113,7 +113,6 @@ def obtener_fechas_y_links_boletines(html: str, convertir_a_date: bool = False):
             try:
                 fecha_val = parse_fecha_boletin(fecha_txt)
             except Exception:
-                # si alguna fecha viene en formato raro, la saltas o la guardas raw
                 continue
             resultados.append((fecha_val, url))
         else:

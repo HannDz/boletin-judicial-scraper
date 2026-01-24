@@ -5,12 +5,12 @@ from db import engine
 def insertar_expediente(data: dict) -> int:
     sql = text("""
         insert into expedientes (
-          id_expediente, juzgado, actor_demandante, demandado, tipo_juicio,
+          id_expediente, sala, actor_demandante, demandado, tipo_juicio,
           fecha_publicacion, extracto_acuerdo, estatus_riesgo,
           numero_boletin, numero_pagina, estatus
         )
         values (
-          :id_expediente, :juzgado, :actor_demandante, :demandado, :tipo_juicio,
+          :id_expediente, :sala, :actor_demandante, :demandado, :tipo_juicio,
           :fecha_publicacion, :extracto_acuerdo, :estatus_riesgo,
           :numero_boletin, :numero_pagina, :estatus
         )
@@ -91,11 +91,11 @@ def existe_procesamiento(fecha_boletin: date, url_boletin: str) -> bool:
 
 SQL_INSERT_EXPEDIENTES = text("""
 insert into expedientes (
-  id_expediente, juzgado, actor_demandante, demandado, tipo_juicio,
+  id_expediente, sala, actor_demandante, demandado, tipo_juicio,
   fecha_publicacion,
   numero_boletin, numero_pagina, estatus
 ) values (
-  :id_expediente, :juzgado, :actor_demandante, :demandado, :tipo_juicio,
+  :id_expediente, :sala, :actor_demandante, :demandado, :tipo_juicio,
   :fecha_publicacion,
   :numero_boletin, :numero_pagina, :estatus
 );
@@ -103,7 +103,7 @@ insert into expedientes (
 
 CAMPOS_EXPEDIENTE = [
     "id_expediente",
-    "juzgado",
+    "sala",
     "actor_demandante",
     "demandado",
     "tipo_juicio",

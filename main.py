@@ -20,13 +20,9 @@ session.headers.update({
 URL_Boletin = settings.url_boletin
 textos = []
 debug = settings.is_debbug
-#html = obtener_html(URL_Boletin)
 html2 = obtener_html_filtrado(settings.url_boletin_filtro,URL_Boletin, settings.fecha_ini, settings.fecha_fin)
 
 externos = extraer_externos(html2,settings.is_debbug)
-print("HTML obtenido correctamente")
-
-#links = obtener_fechas_y_links_boletines(html, settings.is_debbug)
 state = ParserState()
 
 for fecha,l in externos:
@@ -49,7 +45,6 @@ for fecha,l in externos:
                     fecha_pub , num_boletin = extraer_fecha_y_numero_boletin(texto)
                 elif inicio_columnas <= contador:
                     texto = procesar_pagina_columna(session, html_thumb, contador)
-                    #expedientes.extend(parse_arrendamiento_block(texto, fecha_pub, num_boletin, contador+2))
                     expedientes.extend(parse_arrendamiento_block(texto, fecha_pub, num_boletin, contador + 2, state))
 
                 if debug:
@@ -65,9 +60,9 @@ for fecha,l in externos:
             contador = extraer_total_paginas(texto)
             texto_limpio = limpiar_ruido_boletin(texto)
             expedientes.extend(parse_arrendamiento_salas_block_v2(texto_limpio, fecha.isoformat(), 38, 2))
-        cont = 1
-        fecha_string = fecha.isoformat()
         if debug:
+            cont = 1
+            fecha_string = fecha.isoformat()
             textos.append(texto)
             for cont, texto in enumerate(textos, start=1):
                 ruta_salida = f"revision_boletin{fecha_string}.txt"
@@ -87,7 +82,7 @@ for fecha,l in externos:
             url_boletin=l,
             estado="TERMINADO",
             descargado=False,
-            nombre_archivo="",#f"boletin_{fecha_string}.pdf",
+            nombre_archivo="",
             total_paginas=contador,
             total_expedientes=len(expedientes),
             )

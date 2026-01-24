@@ -56,15 +56,6 @@ def obtener_visor_desde_thumb(html):
     )
     return match.group(1) if match else None
 
-# def descargar_pdf(url_pdf: str, salida_path: str):
-#     r = requests.get(url_pdf, timeout=60)
-#     r.raise_for_status()
-#     with open(salida_path, "wb") as f:
-#         f.write(r.content)
-#     return salida_path
-
-
-
 def descargar_pdf(url_pdf: str, out_path: str = "boletin.pdf") -> str:
     r = requests.get(url_pdf, timeout=60)
     r.raise_for_status()
