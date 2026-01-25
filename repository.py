@@ -90,15 +90,26 @@ def existe_procesamiento(fecha_boletin: date, url_boletin: str) -> bool:
 # """)
 
 SQL_INSERT_EXPEDIENTES = text("""
-insert into expedientes (
-  id_expediente, sala, actor_demandante, demandado, tipo_juicio,
-  fecha_publicacion,
-  numero_boletin, numero_pagina, estatus
-) values (
-  :id_expediente, :sala, :actor_demandante, :demandado, :tipo_juicio,
-  :fecha_publicacion,
-  :numero_boletin, :numero_pagina, :estatus
-);
+INSERT INTO expedientes (
+    id_expediente, sala, actor_demandante, demandado, tipo_juicio,
+    fecha_publicacion, numero_boletin, numero_pagina, estatus,
+    tipo_persona, razon_social, primer_nombre, segundo_nombre, 
+    primer_apellido, segundo_apellido, nivel_confianza, 
+    nombre_original, nombre_normalizado
+)
+SELECT 
+    :id_expediente, :sala, :actor_demandante, :demandado, :tipo_juicio,
+    :fecha_publicacion, :numero_boletin, :numero_pagina, :estatus,
+    p.tipo_persona, 
+    p.razon_social, 
+    p.primer_nombre, 
+    p.segundo_nombre, 
+    p.primer_apellido, 
+    p.segundo_apellido, 
+    p.nivel_confianza, 
+    p.nombre_original, 
+    p.nombre_normalizado
+FROM parse_demandante(:demandado) AS p;
 """)
 
 CAMPOS_EXPEDIENTE = [
