@@ -2,6 +2,57 @@ import re
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 
+_DASH = r"[-–—]"
+
+RE_EXP = re.compile(
+    rf"\bT\.?\s*(?:(?P<pref>[A-Za-z]{{1,4}})\.?\s*)?"
+    rf"(?P<num>\d{{1,5}})\s*"
+    rf"(?:"
+      rf"(?:/|\s+)\s*(?P<anio_slash>\d{{4}})\s*(?:/|\s+)\s*(?P<seq_slash>\d{{1,3}})"
+      rf"|{_DASH}\s*(?P<anio_h>\d{{3,4}})(?:\s*{_DASH}\s*(?P<seq_h>\d{{1,3}}))?"
+    rf")",
+    re.IGNORECASE
+)
+
+def _fix_year_ocr(year: str) -> str:
+    y = (year or "").strip()
+    # OCR típico: 2021 -> 201, 2022 -> 202, 2023 -> 203
+    if len(y) == 3 and y.startswith("20") and y[2].isdigit():
+        return "202" + y[2]
+    return y
+
+def _extract_expedientes(text: str) -> List[str]:
+    """Extrae expedientes en formatos:
+       - T. In 1835/2025/001
+       - T. 615-2022-002
+       - T. 1129-2022
+       - tolera saltos de línea y OCR
+    """
+    out: List[str] = []
+    seen = set()
+
+    for m in RE_EXP.finditer(text):
+        pref = (m.group("pref") or "").strip()
+        num  = m.group("num").strip()
+
+        if m.group("anio_slash"):
+            anio = m.group("anio_slash").strip()
+            seq  = m.group("seq_slash").strip().zfill(3)
+            exp = f"T. {pref} {num}/{anio}/{seq}".strip() if pref else f"T. {num}/{anio}/{seq}"
+        else:
+            anio = _fix_year_ocr(m.group("anio_h"))
+            seq  = m.group("seq_h")
+            if seq:
+                exp = f"T. {num}-{anio}-{seq.strip().zfill(3)}"
+            else:
+                exp = f"T. {num}-{anio}"
+
+        if exp not in seen:
+            seen.add(exp)
+            out.append(exp)
+
+    return out
+
 RE_TIPO = re.compile(
     r"(Controv\.\s*de\s*Arrendamiento|Especial\s*de\s*Arrendamiento\s*Oral)",
     re.IGNORECASE
@@ -91,6 +142,98 @@ RE_ITEM_ARREND = re.compile(
     r"(?P<num>\d{1,6})\s*[/\-]\s*(?P<anio>\d{4})\s*[/\-]\s*(?P<cons>\d{3})",
     re.IGNORECASE
 )
+
+# -----------------------------
+# Split demandados (OCR-friendly)
+# -----------------------------
+RE_CORP_COMMA_DELIM = re.compile(
+    r"(?P<suf>\b(?:S\.A\.P\.I\.?\s*de\s*C\.V\.|S\.A\.?\s*de\s*C\.V\.|S\.?\s*de\s*R\.L\.?\s*de\s*C\.V\.|"
+    r"S\.?\s*de\s*R\.L\.|S\.A\.|A\.C\.|S\.C\.|SC)\b)\s*,\s*(?=[A-ZÁÉÍÓÚÑ\"“‘])",
+    re.IGNORECASE
+)
+RE_Y_SPLIT = re.compile(r"\s+(?:y|e)\s+(?=[A-ZÁÉÍÓÚÑ\"“‘])", re.IGNORECASE)
+
+# def split_demandados(demandado_raw: str) -> List[str]:
+#     """
+#     Devuelve lista de demandados.
+#     - Mantiene razones sociales completas (no corta en comas internas).
+#     - Si hay lista: "Empresa, S.A. de C.V., Persona1 y Persona2" => [Empresa..., Persona1, Persona2]
+#     - Divide por 'y/e' cuando lo siguiente parece nombre (mayúscula).
+#     """
+#     if not demandado_raw:
+#         return []
+
+#     s = demandado_raw
+
+#     # normaliza comillas/espacios OCR
+#     s = s.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+#     s = re.sub(r"\s+", " ", s).strip(" .;:-|")
+
+#     # corta ruido típico
+#     s = re.sub(r"\s+su\s+Sucesi[oó]n\b.*$", "", s, flags=re.IGNORECASE).strip()
+
+#     # marca cortes por coma solo cuando hay sufijo corporativo antes de la coma
+#     s = RE_CORP_COMMA_DELIM.sub(r"\g<suf> | ", s)
+
+#     partes: List[str] = []
+#     for p in RE_Y_SPLIT.split(s):
+#         for q in p.split("|"):
+#             q = q.strip(" \"'.,;:-")
+#             q = re.sub(r"\s+", " ", q).strip()
+#             if not q:
+#                 continue
+#             if re.fullmatch(r"(?:y\s+)?otros?", q, flags=re.IGNORECASE):
+#                 continue
+#             partes.append(_clean_name_chunk(q))
+
+#     # dedupe manteniendo orden
+#     out: List[str] = []
+#     seen = set()
+#     for x in partes:
+#         if x and x not in seen:
+#             seen.add(x)
+#             out.append(x)
+
+#     return out
+
+def split_demandados(demandado_raw: str) -> List[str]:
+    if not demandado_raw:
+        return []
+
+    s = demandado_raw
+
+    s = s.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+    s = re.sub(r"\s+", " ", s).strip(" .;:-|")
+
+    # ✅ NUEVO: separa "yBravo" / "eInstituto" => "y Bravo" / "e Instituto"
+    s = re.sub(r"(?i)\b([ye])(?=[A-ZÁÉÍÓÚÑ])", r"\1 ", s)
+    
+    s = re.split(r"(?i)\bquien\s+tamb[ií]en\s+se\s+ostenta\b", s, maxsplit=1)[0].strip()
+
+    # corta ruido típico
+    s = re.sub(r"\s+su\s+Sucesi[oó]n\b.*$", "", s, flags=re.IGNORECASE).strip()
+
+    s = RE_CORP_COMMA_DELIM.sub(r"\g<suf> | ", s)
+
+    partes: List[str] = []
+    for p in RE_Y_SPLIT.split(s):
+        for q in p.split("|"):
+            q = q.strip(" \"'.,;:-")
+            q = re.sub(r"\s+", " ", q).strip()
+            if not q:
+                continue
+            if re.fullmatch(r"(?:y\s+)?otros?", q, flags=re.IGNORECASE):
+                continue
+            partes.append(_clean_name_chunk(q))
+
+    out: List[str] = []
+    seen = set()
+    for x in partes:
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
+
+    return out
 
 @dataclass
 class ParserState:
@@ -305,17 +448,23 @@ def parse_arrendamiento_block(
             continue
 
         actor = _clean_name_chunk(_strip_headers(actor_raw)) or None
-        demandado = _clean_name_chunk(resto[:m_tipo0.start()]) or None
+
+        # ✅ antes: demandado = ...
+        demandado_raw = _clean_name_chunk(resto[:m_tipo0.start()]) or ""
+
+        # ✅ NUEVO: separa demandados (si no logra separar, usa el raw)
+        demandados = split_demandados(demandado_raw)
+        if not demandados:
+            demandados = [demandado_raw.strip() or None]
 
         # ✅ sala por posición (si está en la página), si no, usa la última guardada
         tipo_abs_pos = case_start + vs_rel_end + m_tipo0.start()
-        # sala_civil = _sala_para_pos(sala_starts, sala_values, tipo_abs_pos)
-        # if not sala_civil:
-        #     sala_civil = state.last_sala_civil  # fallback
         sala_civil = _sala_para_pos(sala_starts, sala_values, tipo_abs_pos)
 
         # Si la sala encontrada es genérica, usa la del estado si es más específica
-        if sala_civil and RE_SOLO_SALA_CIVIL.match(sala_civil) and state.last_sala_civil and not RE_SOLO_SALA_CIVIL.match(state.last_sala_civil):
+        if (sala_civil and RE_SOLO_SALA_CIVIL.match(sala_civil)
+                and state.last_sala_civil
+                and not RE_SOLO_SALA_CIVIL.match(state.last_sala_civil)):
             sala_civil = state.last_sala_civil
 
         # Si no hay sala en página, usa estado
@@ -342,27 +491,29 @@ def parse_arrendamiento_block(
                     num_estatus = int(m_ac.group(1))
                     estatus = "Acdo"
 
-            reg = {
-                "id_expediente": id_expediente,
-                "actor_demandante": actor,
-                "demandado": demandado,
-                "tipo_juicio": tipo_juicio,
-                "estatus": estatus,
-                "num_estatus": num_estatus,
-                "fecha_publicacion": fecha_pub,
-                "numero_boletin": num_boletin,
-                "numero_pagina": num_pag,
-                "sala": sala_civil,  # ✅ ya no se pierde
-            }
+            # ✅ NUEVO: genera 1 registro por demandado
+            for demandado in demandados:
+                reg = {
+                    "id_expediente": id_expediente,
+                    "actor_demandante": actor,
+                    "demandado": demandado,
+                    "tipo_juicio": tipo_juicio,
+                    "estatus": estatus,
+                    "num_estatus": num_estatus,
+                    "fecha_publicacion": fecha_pub,
+                    "numero_boletin": num_boletin,
+                    "numero_pagina": num_pag,
+                    "sala": sala_civil,  # ✅ respeta tu implementación de state
+                }
 
-            key = (
-                reg["id_expediente"], reg["actor_demandante"], reg["demandado"],
-                reg["tipo_juicio"], reg["estatus"], reg["num_estatus"],
-                reg["sala"], reg["fecha_publicacion"], reg["numero_boletin"], reg["numero_pagina"]
-            )
-            if key not in seen:
-                seen.add(key)
-                resultados.append(reg)
+                key = (
+                    reg["id_expediente"], reg["actor_demandante"], reg["demandado"],
+                    reg["tipo_juicio"], reg["estatus"], reg["num_estatus"],
+                    reg["sala"], reg["fecha_publicacion"], reg["numero_boletin"], reg["numero_pagina"]
+                )
+                if key not in seen:
+                    seen.add(key)
+                    resultados.append(reg)
 
     return resultados
 
