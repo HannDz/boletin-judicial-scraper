@@ -21,10 +21,6 @@ def insertar_expediente(data: dict) -> int:
         new_id = conn.execute(sql, data).scalar_one()
         return new_id
 
-from datetime import date
-from sqlalchemy import text
-from db import engine
-
 def insertar_procesamiento_boletin(
     fecha_boletin: date,
     url_boletin: str,
@@ -92,14 +88,14 @@ def existe_procesamiento(fecha_boletin: date, url_boletin: str) -> bool:
 SQL_INSERT_EXPEDIENTES = text("""
 INSERT INTO expedientes (
     id_expediente, sala, actor_demandante, demandado, tipo_juicio,
-    fecha_publicacion, numero_boletin, numero_pagina, estatus,
+    fecha_publicacion, numero_boletin, numero_pagina, estatus, conteo_demandados,
     tipo_persona, razon_social, primer_nombre, segundo_nombre, 
     primer_apellido, segundo_apellido, nivel_confianza, 
     nombre_original, nombre_normalizado
 )
 SELECT 
     :id_expediente, :sala, :actor_demandante, :demandado, :tipo_juicio,
-    :fecha_publicacion, :numero_boletin, :numero_pagina, :estatus,
+    :fecha_publicacion, :numero_boletin, :numero_pagina, :estatus, :conteo_demandados,
     p.tipo_persona, 
     p.razon_social, 
     p.primer_nombre, 
@@ -124,6 +120,7 @@ CAMPOS_EXPEDIENTE = [
     "numero_boletin",
     "numero_pagina",
     "estatus",
+    "conteo_demandados",
 ]
 
 def normalizar_registro(reg: dict) -> dict:

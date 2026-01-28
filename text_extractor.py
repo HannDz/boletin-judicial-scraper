@@ -1,6 +1,7 @@
 import re
 from typing import List, Dict, Optional
 from dataclasses import dataclass
+from collections import defaultdict
 
 _DASH = r"[-–—]"
 
@@ -55,11 +56,6 @@ def _extract_expedientes(text: str) -> List[str]:
 
 RE_TIPO = re.compile(
     r"(Controv\.\s*de\s*Arrendamiento|Especial\s*de\s*Arrendamiento\s*Oral)",
-    re.IGNORECASE
-)
-
-RE_EXP = re.compile(
-    r"(?:T\.?\s*Ap\.?\s*\d+/\d{4}/\d{3})|(?:T\.\s*\d+/\d{4}/\d{3})|\b\d+/\d{4}\b",
     re.IGNORECASE
 )
 
@@ -153,88 +149,6 @@ RE_CORP_COMMA_DELIM = re.compile(
 )
 RE_Y_SPLIT = re.compile(r"\s+(?:y|e)\s+(?=[A-ZÁÉÍÓÚÑ\"“‘])", re.IGNORECASE)
 
-# def split_demandados(demandado_raw: str) -> List[str]:
-#     """
-#     Devuelve lista de demandados.
-#     - Mantiene razones sociales completas (no corta en comas internas).
-#     - Si hay lista: "Empresa, S.A. de C.V., Persona1 y Persona2" => [Empresa..., Persona1, Persona2]
-#     - Divide por 'y/e' cuando lo siguiente parece nombre (mayúscula).
-#     """
-#     if not demandado_raw:
-#         return []
-
-#     s = demandado_raw
-
-#     # normaliza comillas/espacios OCR
-#     s = s.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
-#     s = re.sub(r"\s+", " ", s).strip(" .;:-|")
-
-#     # corta ruido típico
-#     s = re.sub(r"\s+su\s+Sucesi[oó]n\b.*$", "", s, flags=re.IGNORECASE).strip()
-
-#     # marca cortes por coma solo cuando hay sufijo corporativo antes de la coma
-#     s = RE_CORP_COMMA_DELIM.sub(r"\g<suf> | ", s)
-
-#     partes: List[str] = []
-#     for p in RE_Y_SPLIT.split(s):
-#         for q in p.split("|"):
-#             q = q.strip(" \"'.,;:-")
-#             q = re.sub(r"\s+", " ", q).strip()
-#             if not q:
-#                 continue
-#             if re.fullmatch(r"(?:y\s+)?otros?", q, flags=re.IGNORECASE):
-#                 continue
-#             partes.append(_clean_name_chunk(q))
-
-#     # dedupe manteniendo orden
-#     out: List[str] = []
-#     seen = set()
-#     for x in partes:
-#         if x and x not in seen:
-#             seen.add(x)
-#             out.append(x)
-
-#     return out
-
-def split_demandados(demandado_raw: str) -> List[str]:
-    if not demandado_raw:
-        return []
-
-    s = demandado_raw
-
-    s = s.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
-    s = re.sub(r"\s+", " ", s).strip(" .;:-|")
-
-    # ✅ NUEVO: separa "yBravo" / "eInstituto" => "y Bravo" / "e Instituto"
-    s = re.sub(r"(?i)\b([ye])(?=[A-ZÁÉÍÓÚÑ])", r"\1 ", s)
-    
-    s = re.split(r"(?i)\bquien\s+tamb[ií]en\s+se\s+ostenta\b", s, maxsplit=1)[0].strip()
-
-    # corta ruido típico
-    s = re.sub(r"\s+su\s+Sucesi[oó]n\b.*$", "", s, flags=re.IGNORECASE).strip()
-
-    s = RE_CORP_COMMA_DELIM.sub(r"\g<suf> | ", s)
-
-    partes: List[str] = []
-    for p in RE_Y_SPLIT.split(s):
-        for q in p.split("|"):
-            q = q.strip(" \"'.,;:-")
-            q = re.sub(r"\s+", " ", q).strip()
-            if not q:
-                continue
-            if re.fullmatch(r"(?:y\s+)?otros?", q, flags=re.IGNORECASE):
-                continue
-            partes.append(_clean_name_chunk(q))
-
-    out: List[str] = []
-    seen = set()
-    for x in partes:
-        if x and x not in seen:
-            seen.add(x)
-            out.append(x)
-
-    return out
-
 @dataclass
 class ParserState:
     last_sala_civil: Optional[str] = None
@@ -281,7 +195,7 @@ RE_ARR = re.compile(r"\bArrend(?:\.|amiento)\b", re.IGNORECASE)
 
 # Solo aceptamos tipos completos (si no está completo -> se omite)
 RE_TIPO_ARR_ANY = re.compile(
-    r"(?P<tipo>\b(?:Especial|Controv)\.?\s*(?:de\s+)?Arrendamiento(?:\s+Oral)?\b)",
+    r"(?P<tipo>\b(?:\w{2,20}\s*[-–—]\s*)?(?:Especial|Controv)\.?\s*(?:de\s+)?Arrend(?:\.|amiento)(?:\s+Oral)?\b)",
     re.IGNORECASE
 )
 
@@ -395,6 +309,113 @@ def _sala_para_pos(starts, values, pos: int) -> Optional[str]:
     i -= 1
     return values[i] if i >= 0 else None
 
+# ✅ tolerante a OCR: "instituci..." cubre Institución / Institucien / Institucién / Institucion
+# y lo mismo con divisi..., fiduci..., fideicomis...
+DESCRIPTORES_POST_SUF = (
+    r"(?:"
+    r"instituci\w*|"
+    r"divisi\w*|"
+    r"grupo|financier\w*|"
+    r"fiduci\w*|"
+    r"fideicomis\w*|"
+    r"administraci\w*|direcci\w*|"
+    r"como|"
+    r"ord|ejec|esp|juris|controv|incid|cuad|amp|expdlo"
+    r")\b"
+)
+
+RE_CORP_COMMA_DELIM = re.compile(
+    rf"(?P<suf>\b(?:"
+    rf"S\.?\s*A\.?\s*P\.?\s*I\.?\s*de\s*C\.?\s*V\.?|"
+    rf"S\.?\s*A\.?\s*de\s*C\.?\s*V\.?|"
+    rf"S\.?\s*de\s*R\.?\s*L\.?\s*de\s*C\.?\s*V\.?|"
+    rf"S\.?\s*de\s*R\.?\s*L\.?|"
+    rf"S\.?\s*A\.?|SA|"
+    rf"A\.?\s*C\.?|"
+    rf"S\.?\s*C\.?|SC"
+    rf")\b)"
+    rf"\s*,\s*"
+    rf"(?!(?:{DESCRIPTORES_POST_SUF}))"     # ✅ si después viene "instituci..." o "divisi..." NO cortes
+    rf"(?=[A-ZÁÉÍÓÚÑ\"“‘])",
+    re.IGNORECASE
+)
+
+RE_Y_SPLIT = re.compile(r"\s+(?:y|e)\s+(?=[A-ZÁÉÍÓÚÑ\"“‘])", re.IGNORECASE)
+
+def _join_dropped_initials(s: str) -> str:
+    """
+    Repara casos OCR tipo: 'E spejel' -> 'Espejel'
+    Solo une si: 1 letra + espacio + palabra en minúsculas (>=3 letras)
+    """
+    return re.sub(
+        r"\b([A-ZÁÉÍÓÚÑ])\s+([a-záéíóúñ]{3,})\b",
+        lambda m: m.group(1) + m.group(2),
+        s
+    )
+
+def split_demandados(demandado_raw: str) -> List[str]:
+    if not demandado_raw:
+        return []
+
+    s = demandado_raw
+
+    # Normaliza comillas/espacios
+    s = s.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+    s = re.sub(r"\s+", " ", s).strip(" .;:-|")
+
+    # ✅ separa "yBravo" / "eInstituto" => "y Bravo" / "e Instituto"
+    s = re.sub(r"(?i)\b([ye])(?=[A-ZÁÉÍÓÚÑ])", r"\1 ", s)
+
+    # ✅ conserva solo lo anterior a "Quien También Se Ostenta..."
+    s = re.split(r"(?i)\bquien\s+tamb[ií]en\s+se\s+ostenta\b", s, maxsplit=1)[0].strip()
+
+    # ✅ separadores fuertes (listas reales)
+    s = re.sub(r"\s*;\s*", " | ", s)   # ; => separa demandados
+    s = re.sub(r"\s*\|\s*", " | ", s)
+
+    # Ruido típico
+    s = re.sub(r"\s+su\s+Sucesi[oó]n\b.*$", "", s, flags=re.IGNORECASE).strip()
+
+    # ✅ solo convierte coma en separador si NO viene descriptor OCR-friendly
+    s = RE_CORP_COMMA_DELIM.sub(r"\g<suf> | ", s)
+
+    # 1) split base por "|"
+    partes: List[str] = []
+    for chunk in [c.strip() for c in s.split("|") if c.strip()]:
+        # 2) split por "y/e" (lista)
+        for p in RE_Y_SPLIT.split(chunk):
+            q = p.strip(" \"'.,;:-")
+            q = re.sub(r"\s+", " ", q).strip()
+            if not q:
+                continue
+            if re.fullmatch(r"(?:y\s+)?otros?", q, flags=re.IGNORECASE):
+                continue
+            partes.append(q)
+
+    # ✅ NUEVO: unir fragmentos basura de OCR:
+    # - "n", "l", "smeralda", "spejel Morales" (empiezan con minúscula o son muy cortos)
+    merged: List[str] = []
+    for p in partes:
+        p = p.strip()
+        if not p:
+            continue
+        if merged and (len(p) <= 2 or re.match(r"^[a-záéíóúñ]", p)):
+            merged[-1] = (merged[-1] + " " + p).strip()
+        else:
+            merged.append(p)
+
+    # Limpieza final + dedupe manteniendo orden
+    out: List[str] = []
+    seen = set()
+    for x in merged:
+        x = _join_dropped_initials(x)
+        x = _clean_name_chunk(x)  # tu función existente
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
+
+    return out
+
 def parse_arrendamiento_block(
     block: str,
     fecha_pub: str,
@@ -422,6 +443,21 @@ def parse_arrendamiento_block(
     if not vs_all:
         return []
 
+    def _fmt_exp_from_match(m: re.Match) -> str:
+        pref = (m.group("pref") or "").strip()
+        num  = (m.group("num") or "").strip()
+
+        if m.group("anio_slash"):
+            anio = (m.group("anio_slash") or "").strip()
+            seq  = (m.group("seq_slash") or "").strip().zfill(3)
+            return (f"T. {pref} {num}/{anio}/{seq}".strip() if pref else f"T. {num}/{anio}/{seq}")
+        else:
+            anio = _fix_year_ocr(m.group("anio_h"))
+            seq  = m.group("seq_h")
+            if seq:
+                return f"T. {num}-{anio}-{seq.strip().zfill(3)}"
+            return f"T. {num}-{anio}"
+
     for i, vs_m in enumerate(vs_all):
         case_start = _case_start_before_vs_ocr(text, vs_m.start())
         case_start = _safe_case_start(text, vs_m.start(), case_start)
@@ -429,6 +465,7 @@ def parse_arrendamiento_block(
         case_end = vs_all[i + 1].start() if (i + 1) < len(vs_all) else len(text)
         caso = text[case_start:case_end].strip()
 
+        # ✅ si no hay Arrend en el caso, no lo proceses
         if not caso or not RE_ARR.search(caso):
             continue
 
@@ -440,19 +477,19 @@ def parse_arrendamiento_block(
         actor_raw = caso[:vs_rel_start]
         resto = caso[vs_rel_end:]
 
+        # ✅ Tipo completo (Especial/Controv + Arrend. / Arrendamiento)
         m_tipo0 = RE_TIPO_ARR_ANY.search(resto)
         if not m_tipo0:
             continue
 
-        if RE_VS.search(resto[:m_tipo0.start()]):  # mezcla => omitimos
+        # ✅ Si antes del tipo aparece otro "vs", es mezcla => omite
+        if RE_VS.search(resto[:m_tipo0.start()]):
             continue
 
         actor = _clean_name_chunk(_strip_headers(actor_raw)) or None
 
-        # ✅ antes: demandado = ...
+        # Demandado(s)
         demandado_raw = _clean_name_chunk(resto[:m_tipo0.start()]) or ""
-
-        # ✅ NUEVO: separa demandados (si no logra separar, usa el raw)
         demandados = split_demandados(demandado_raw)
         if not demandados:
             demandados = [demandado_raw.strip() or None]
@@ -467,21 +504,22 @@ def parse_arrendamiento_block(
                 and not RE_SOLO_SALA_CIVIL.match(state.last_sala_civil)):
             sala_civil = state.last_sala_civil
 
-        # Si no hay sala en página, usa estado
         if not sala_civil:
             sala_civil = state.last_sala_civil
 
-        for it in RE_ARR_ITEM_OCR.finditer(resto):
-            tipo_juicio = _clean_chunk(it.group("tipo"))
-            pref = (it.group("pref") or "").strip()
+        tipo_juicio = _clean_chunk(m_tipo0.group("tipo"))
 
-            num = _compact_digits(it.group("num"))
-            anio = _compact_digits(it.group("anio"))
-            seq = _compact_digits(it.group("seq")).zfill(3)
+        # ✅ en vez de RE_ARR_ITEM_OCR, extrae expedientes robusto (2023 incluido)
+        segmento = resto[m_tipo0.start():]
+        exp_matches = list(RE_EXP.finditer(segmento))
+        if not exp_matches:
+            # si no hay expediente, omitimos (estructura incompleta)
+            continue
 
-            id_expediente = f"T. {pref} {num}/{anio}/{seq}" if pref else f"T. {num}/{anio}/{seq}"
+        for em in exp_matches:
+            id_expediente = _fmt_exp_from_match(em)
 
-            tail = resto[it.end(): it.end() + 180]
+            tail = segmento[em.end(): em.end() + 220]
             estatus, num_estatus = None, None
             if RE_SENT.search(tail):
                 estatus = "Sent"
@@ -491,7 +529,6 @@ def parse_arrendamiento_block(
                     num_estatus = int(m_ac.group(1))
                     estatus = "Acdo"
 
-            # ✅ NUEVO: genera 1 registro por demandado
             for demandado in demandados:
                 reg = {
                     "id_expediente": id_expediente,
@@ -503,7 +540,10 @@ def parse_arrendamiento_block(
                     "fecha_publicacion": fecha_pub,
                     "numero_boletin": num_boletin,
                     "numero_pagina": num_pag,
-                    "sala": sala_civil,  # ✅ respeta tu implementación de state
+
+                    # ✅ mantén ambos para no perderlo
+                    "sala": sala_civil,
+                    "juzgado": sala_civil,
                 }
 
                 key = (
@@ -511,11 +551,13 @@ def parse_arrendamiento_block(
                     reg["tipo_juicio"], reg["estatus"], reg["num_estatus"],
                     reg["sala"], reg["fecha_publicacion"], reg["numero_boletin"], reg["numero_pagina"]
                 )
+
                 if key not in seen:
                     seen.add(key)
                     resultados.append(reg)
 
     return resultados
+
 
 RE_VS_LINE = re.compile(r"^\s*[A-ZÁÉÍÓÚÑ(].{3,300}\bvs\.?\b", re.IGNORECASE)
 RE_CASE_LINE = re.compile(r"^\s*[A-ZÁÉÍÓÚÑ(].{3,300}\bvs\.?\b", re.IGNORECASE)
@@ -571,4 +613,63 @@ def extract_from_full_text(full_text: str) -> List[Dict]:
                 results.append(r)
 
     return results
+
+# def enumerar_demandados_por_expediente(registros: List[Dict]) -> List[Dict]:
+#     """
+#     Asigna conteo_demandados = índice incremental (1..N) para demandados únicos por id_expediente.
+#     - Si un demandado se repite dentro del mismo expediente, conserva el mismo número.
+#     - El orden es por primera aparición en la lista.
+#     """
+#     # exp -> { demandado : idx }
+#     idx_map = defaultdict(dict)
+#     # exp -> siguiente idx
+#     next_idx = defaultdict(lambda: 1)
+
+#     for r in registros:
+#         exp = (r.get("id_expediente") or "").strip()
+#         dem = (r.get("demandado") or "").strip()
+
+#         if not exp or not dem:
+#             r["conteo_demandados"] = None
+#             continue
+
+#         # Si ya existe ese demandado en ese expediente, reutiliza índice
+#         if dem in idx_map[exp]:
+#             r["conteo_demandados"] = idx_map[exp][dem]
+#         else:
+#             idx = next_idx[exp]
+#             idx_map[exp][dem] = idx
+#             r["conteo_demandados"] = idx
+#             next_idx[exp] = idx + 1
+
+#     return registros
+
+def enumerar_demandados_por_expediente(registros: List[Dict]) -> List[Dict]:
+    """
+    Asigna conteo_demandados = "demandado: N" (N incremental) para demandados únicos por id_expediente.
+    - Si un demandado se repite en el mismo expediente, conserva el mismo N.
+    - Orden por primera aparición.
+    """
+    idx_map = defaultdict(dict)              # exp -> { demandado: idx }
+    next_idx = defaultdict(lambda: 1)        # exp -> siguiente idx
+
+    for r in registros:
+        exp = (r.get("id_expediente") or "").strip()
+        dem = (r.get("demandado") or "").strip()
+
+        if not exp or not dem:
+            r["conteo_demandados"] = None
+            continue
+
+        if dem in idx_map[exp]:
+            idx = idx_map[exp][dem]
+        else:
+            idx = next_idx[exp]
+            idx_map[exp][dem] = idx
+            next_idx[exp] = idx + 1
+
+        r["conteo_demandados"] = f"demandado: {idx}"
+
+    return registros
+
 
