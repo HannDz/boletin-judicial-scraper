@@ -59,7 +59,7 @@ for fecha,l in externos:
             eliminar_pdf(path_salida) 
             contador = extraer_total_paginas(texto)
             texto_limpio = limpiar_ruido_boletin(texto)
-            expedientes.extend(parse_arrendamiento_salas_block_v2(texto_limpio, fecha.isoformat(), 38, 2))
+            expedientes.extend(parse_arrendamiento_salas_block_v2(texto, fecha.isoformat(), 38, 2))
         if debug:
             cont = 1
             fecha_string = fecha.isoformat()

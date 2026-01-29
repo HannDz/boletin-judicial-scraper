@@ -55,6 +55,19 @@ RE_FECHA_LARGA = re.compile(
     r"\b(?:Lunes|Martes|Miercoles|Mi[eé]rcoles|Jueves|Viernes|Sabado|S[áa]bado|Domingo)\s+\d{1,2}\s+de\s+[A-Za-záéíóúñ]+\s+del?\s+\d{4}\b",
     re.IGNORECASE
 )
+RE_TIPO_OBJETIVO = re.compile(
+    r"(?P<tipo>"
+    r"(?:"
+    r"(?:Controv\.?\s*(?:de\s*)?Arrend(?:\.|amiento)?)"
+    r"|(?:Cnpcyf\s*-\s*Especial\s*de\s*Arrendamiento\s*Oral)"
+    r"|(?:Especial\s*de\s*Arrendamiento\s*Oral)"
+    r"|(?:Arrend\.?)"
+    r"|(?:Ejec\.?\s*Merc\.?)"         # ✅ NUEVO
+    r"|(?:Ejec\s*Merc\.?)"           # ✅ OCR: sin punto
+    r")"
+    r")",
+    re.IGNORECASE
+)
 
 def limpiar_ruido_boletin(texto: str) -> str:
     """
@@ -290,12 +303,317 @@ def _case_end_from_vs(text: str, case_start: int, vs_start: int) -> int:
     nl = window.find("\n", me.end())
     return case_start + (nl if nl != -1 else len(window))
 
+# Palabras que indican que la coma NO separa demandados (es “descripción” corporativa)
+_DEMANDADO_NO_SPLIT_AFTER = {
+    "institucion", "institución", "institucien", "institucién",
+    "grupo", "financiero", "division", "división", "fiduciaria",
+    "como", "fiduciario", "fideicomiso", "identificado", "identificada",
+    "con", "numero", "número", "del", "de", "la", "el", "en", "entidad",
+    "objeto", "multiple", "múltiple", "regulada", "no", "publicado", "publicada"
+}
+
+# Tokens “ruido” tipo "y Otra"
+_RE_OTRO = re.compile(r"(?i)^(?:otr[oa]s?)\.?$")
+
+# Frases de alias: corta todo lo que venga DESPUÉS
+_ALIAS_SPLITS = [
+    r"(?i)\bquien\s+tamb[ií]en\s+se\s+ostenta\b",
+    r"(?i)\bquien\s+tamb[ií]en\s+se\s+ostenta\s+como\b",
+    r"(?i)\bquien\s+tamb[ií]en\s+acostumbra\s+usar\b",
+    r"(?i)\bquien\s+tamb[ií]en\s+acostumbra\s+usar\s+el\s+nombre\b",
+    r"(?i)\btambi[eé]n\s+conocid[oa]\s+como\b",
+    r"(?i)\banteriormente\s+conocid[oa]\s+como\b",
+]
+
+# Split por "y/e" SOLO si después parece iniciar otro demandado (Mayúscula o comilla)
+RE_Y_SPLIT = re.compile(r"(?i)\s+\b(?:y|e)\b\s+(?=[\"“”A-ZÁÉÍÓÚÑ])")
+
+# Tokens tipo "y Otra", "y Otros", etc.
+RE_OTRO_TOKEN = re.compile(r"(?i)^(?:y|e)?\s*otr[oa]s?\b\.?$")
+
+def _fix_ocr_broken_initials(s: str) -> str:
+    """
+    Une letra MAYÚSCULA suelta + palabra en minúscula (OCR):
+      'E varisto' -> 'Evaristo'
+    y limpia basura típica ' n ' / ' l ' suelta que aparece en corporativos.
+    """
+    if not s:
+        return s
+
+    # Une "E varisto" -> "Evaristo" (solo si la 2a parte tiene 2+ letras)
+    s = re.sub(r"\b([A-ZÁÉÍÓÚÑ])\s+([a-záéíóúñ]{2,})\b", r"\1\2", s)
+
+    # Quita tokens basura sueltos: " n " / " l " antes de mayúscula (en el Fideicomiso / el ...)
+    s = re.sub(r"(?<=\s)[nl]\s+(?=[A-ZÁÉÍÓÚÑ])", "", s)
+
+    return s
+
+def _cut_alias_phrases(s: str) -> str:
+    """
+    Corta todo lo que venga después de frases alias tipo:
+    - "Quien también se ostenta como ..."
+    - "Quien también utiliza/utliza/usa/acostumbra usar el nombre ..."
+    - "También conocido como ..."
+    - "Anteriormente conocido como ..."
+    """
+    if not s:
+        return s
+
+    patterns = [
+        r"(?i)\bquien\s+tamb[ií]en\s+se\s+ostent[ae]\b",
+        r"(?i)\bquien\s+tamb[ií]en\s+(?:utiliz[ae]|utliza|usa|acostumbr[ae]\s+usar)\b",
+        r"(?i)\bquien\s+(?:tamb[ií]en\s+)?(?:utiliz[ae]|utliza|usa|acostumbr[ae]\s+usar)\s+(?:el\s+)?nombre\b",
+        r"(?i)\b(?:tamb[ií]en\s+)?conocid[oa]\s+como\b",
+        r"(?i)\banteriormente\s+conocid[oa]\s+como\b",
+        r"(?i)\bquien\s+tamb[ií]en\s+utiliza\b",
+        r"(?i)\bquien\s+tamb[ií]en\s+utliza\b",
+    ]
+
+    out = s
+    for pat in patterns:
+        out = re.split(pat, out, maxsplit=1)[0].strip()
+
+    return out
+
+def _promote_party_commas_to_semicolon(s: str) -> str:
+    """
+    Convierte ciertas comas en ';' SOLO cuando parecen separar demandados.
+    No rompe: '..., S.A., Institución de ...'
+    Sí separa: '..., C.V., Márquez Meza Rubén ...'
+    """
+    def repl(m: re.Match) -> str:
+        word = m.group(1) or ""
+        wl = word.lower()
+        if wl in _DEMANDADO_NO_SPLIT_AFTER:
+            return m.group(0)  # conserva coma
+        # no separar si el “word” es un sufijo corporativo típico
+        if re.match(r"(?i)^(s\.?a\.?p?i?\.?|sa|s\.?\s*de|sc|s\.?c\.?|a\.?c\.?m\.?)$", word):
+            return m.group(0)
+        return "; "  # esta coma sí separa demandados
+
+    return re.sub(r",\s+([A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñ]+)\b", repl, s)
+
+# ==========================
+# DEMANDADOS: split + alias
+# ==========================
+
+# Tokens corporativos / continuaciones donde NO queremos partir por comas
+_RE_CORP_HINT = re.compile(
+    r"(?i)\b(?:S\.?\s*A\.?|C\.?\s*V\.?|S\.?\s*de\s*R\.?\s*L\.?|S\.?\s*N\.?\s*C\.?|"
+    r"SOFOM|INSTITUCI[OÓ]N|BANCA|FIDUCIARI[OA]|FIDEICOMISO|DIVISI[OÓ]N|SOCIEDAD|GRUPO|"
+    r"FINANCIER[OA]|FIDEICOMIS[OA])\b"
+)
+
+# Palabras basura que salen cuando accidentalmente se corta una línea ("n", "l", "en", etc.)
+_RE_DEMANDADO_NOISE = re.compile(r"(?i)^(?:n|l|el|la|los|las|en|del|de|al)$")
+
+# Token genérico para "Otro(s)/Otra(s)" cuando queda solo
+_RE_OTRO_PDF = re.compile(r"(?i)^(?:otr[oa]s?)\.?$")
+
+def _cut_alias_phrases_pdf(s: str) -> str:
+    """Corta el demandado en cuanto aparece un alias / 'también conocido...' etc."""
+    if not s:
+        return s
+
+    # Variantes OCR comunes: "utliza/utiza" (pierde la i), "tambien/también", etc.
+    patterns = [
+        r"\bquien\s+tambi[eé]n\s+utiliza\b",
+        r"\bquien\s+tambi[eé]n\s+utliza\b",
+        r"\bquien\s+tambi[eé]n\s+utiza\b",
+        r"\bquien\s+tambi[eé]n\s+usa\b",
+        r"\bquien\s+tambi[eé]n\s+se\s+ostenta\s+como\b",
+        r"\bquien\s+tambi[eé]n\s+se\s+ostenta\s+con\s+el\s+nombre\s+de\b",
+        r"\btambi[eé]n\s+conocid[oa]\s+como\b",
+        r"\btambi[eé]n\s+identificad[oa]\s+como\b",
+        r"\b(antes|anteriormente)\s+conocid[oa]\s+como\b",
+        r"\bquien\s+tambi[eé]n\s+acostumbra\s+usar\b",
+        r"\bquien\s+tambi[eé]n\s+se\s+autodenomina\b",
+        r"\bquien\s+tambi[eé]n\s+se\s+denomina\b",
+    ]
+    for pat in patterns:
+        m = re.search(pat, s, flags=re.IGNORECASE)
+        if m:
+            return s[:m.start()].strip(" ,.;:-")
+    return s
+
+
+    patterns = [
+        r"(?i)\bquien\s+tamb[ií]en\s+(?:se\s+ostenta|utiliza|utliza|usa|acostumbra\s+usar|acostumbra\s+utilizar)\b",
+        r"(?i)\b(?:anteriormente\s+)?conocid[oa]\s+como\b",
+        r"(?i)\btambi[eé]n\s+conocid[oa]\s+como\b",
+        r"(?i)\b(?:usa|utiliza|utliza)\s+el\s+nombre\s+de\b",
+        r"(?i)\bquien\s+tamb[ií]en\b",  # fallback amplio
+    ]
+    for pat in patterns:
+        m = re.search(pat, s)
+        if m:
+            s = s[:m.start()].strip()
+    return s
+
+def _join_dropped_initials_pdf(s: str) -> str:
+    """Une casos OCR del tipo 'E varisto' -> 'Evaristo'"""
+    if not s:
+        return ""
+    return re.sub(r"\b([A-ZÁÉÍÓÚÑ])\s+([a-záéíóúñ]{2,})\b", r"\1\2", s)
+
+def _promote_party_commas_to_semicolon_pdf(s: str) -> str:
+    """Convierte COMAS que separan demandados (personas) a ';' sin romper comas internas corporativas."""
+    if not s:
+        return ""
+    out = []
+    last = 0
+    for m in re.finditer(r",\s+(?=[A-ZÁÉÍÓÚÑ])", s):
+        prev = s[max(0, m.start() - 40): m.start()]
+        nxt = s[m.end(): m.end() + 30]
+
+        # Si cerca del separador hay indicios corporativos, NO partir
+        if _RE_CORP_HINT.search(prev) or re.match(
+            r"(?i)(?:S\.?\s*A\.?|C\.?\s*V\.?|INSTITUCI[OÓ]N|DIVISI[OÓ]N|SOFOM|BANCA|GRUPO)\b", nxt
+        ):
+            continue
+
+        out.append(s[last:m.start()])
+        out.append("; ")
+        last = m.end()
+
+    out.append(s[last:])
+    return "".join(out)
+
+def split_demandados_pdf(demandado_raw: str) -> List[str]:
+    """
+    Separa demandados (PDF) de forma robusta y compatible con tu extractor OCR:
+
+    - Corta alias: 'Quien también...', 'También conocido...', etc.
+    - Corrige OCR pegado: 'yBravo' -> 'y Bravo'
+    - Evita falsos splits por 'en/el' roto como 'e n e l' (bug por IGNORECASE en lookahead)
+    - Separa por ';' y por 'y/e' SOLO cuando el siguiente token parece iniciar un nombre/entidad (mayúscula/“comillas”)
+    - Convierte comas a ';' solo cuando la coma realmente separa demandados (no corporativos)
+    - Elimina 'y Otro(s)/Otra(s)' al final
+    """
+    s = _clean_chunk(demandado_raw) if demandado_raw else ""
+    s = (s or "").strip()
+    if not s:
+        return []
+
+    # 1) Alias / también conocido
+    s = _cut_alias_phrases_pdf(s)
+
+    # 2) Reparar OCR pegado: "yBravo" -> "y Bravo" (y también "eEmpresa" -> "e Empresa")
+    s = re.sub(r"(?i)\b([ye])(?=[A-ZÁÉÍÓÚÑ])", r"\1 ", s)
+
+    # 3) 'y Otros/Otras' al final no es un demandado
+    s = re.sub(r"\s+(?:y|e)\s+otr[oa]s?\b\.?$", "", s, flags=re.IGNORECASE).strip()
+
+    # 4) Unir inicial perdida: "E varisto" -> "Evaristo" (evita que luego se dropee la 'E')
+    s = _join_dropped_initials_pdf(s)
+
+    # 5) Arreglos mínimos de stopwords rotos típicos: "e n e l" -> "en el", "e l" -> "el"
+    #    (esto reduce ruido y evita que el split por 'e' se dispare)
+    s = re.sub(r"(?i)\be\s+n\s+e\s+l\b", "en el", s)
+    s = re.sub(r"(?i)\be\s+l\b", "el", s)
+    s = re.sub(r"(?i)\be\s+n\b", "en", s)
+
+    # 6) Si parece corporativo, recorta colas de fideicomiso/fiduciario (no son 'otro demandado')
+    if re.search(r"(?i)\b(S\.?\s*A\.?|S\.?\s*de\s*C\.?V\.?|C\.?V\.?|Banco|Instituci[oó]n|Sofom|Fiduciari[ao]|Divisi[oó]n\s+Fiduciaria)\b", s):
+        m_tail = re.search(
+            r"(?i)\b(?:como\s+fiduciari[ao]|en\s+el\s+fideicomiso|fideicomiso\s+identificado|identificado\s+con|identificado\s+como|con\s+el\s+n[uú]mero|n[uú]mero\s+[A-Z0-9/.-]{2,})\b",
+            s,
+        )
+        if m_tail:
+            s = s[:m_tail.start()].strip(" ,.;:-")
+
+    # 7) Comas que realmente separan demandados -> ';'
+    s = _promote_party_commas_to_semicolon_pdf(s)
+
+    # 8) Split fuerte por ';'
+    parts = [p.strip() for p in re.split(r"\s*;\s*", s) if p.strip()]
+
+    out: List[str] = []
+    seen = set()
+
+    for part in parts:
+        part = _cut_alias_phrases_pdf(part)
+        part = part.strip(" .,-;:")
+
+        if not part:
+            continue
+
+        # ✅ Split por ' y ' / ' e ' SOLO si lo que sigue parece iniciar un nombre/entidad.
+        # Importante: el lookahead debe ser *case-sensitive*; por eso NO usamos (?i) global.
+        subparts = re.split(r"\s+(?i:(?:y|e))\s+(?=[\"“”A-ZÁÉÍÓÚÑ])", part)
+
+        for sp in subparts:
+            sp = _cut_alias_phrases_pdf(sp)
+            sp = _clean_chunk(sp) if sp else ""
+            sp = (sp or "").strip(" .,-;:")
+
+            # ruido típico que queda suelto (n, l, el, de, etc.)
+            if not sp or _RE_DEMANDADO_NOISE.match(sp):
+                continue
+            if _RE_OTRO.match(sp):
+                continue
+
+            key = sp.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(sp)
+
+    return out
+
+
+    # Normaliza pegados: "yBravo" -> "y Bravo"
+    s = re.sub(r"(?i)\b([ye])(?=[A-ZÁÉÍÓÚÑ])", r"\1 ", s)
+
+    # Corta alias global
+    s = _cut_alias_phrases_pdf(s)
+
+    # Quita cola " y Otro(s)/Otra(s)/Otros"
+    s = re.sub(r"\s+(?:y|e)\s+otr[oa]s?\b\.?$", "", s, flags=re.IGNORECASE).strip()
+
+    # Coma separador de personas => ';'
+    s = _promote_party_commas_to_semicolon_pdf(s)
+
+    # Split fuerte por ';'
+    parts = [p.strip() for p in re.split(r"\s*;\s*", s) if p.strip()]
+
+    out: List[str] = []
+    seen = set()
+
+    for part in parts:
+        part = _cut_alias_phrases_pdf(part)
+        part = _join_dropped_initials_pdf(part).strip(" .,-;:")
+        if not part:
+            continue
+
+        # Split por ' y ' / ' e ' SOLO si lo que sigue parece iniciar un nombre/entidad
+        subparts = re.split(r"(?i)\s+(?:y|e)\s+(?=[\"“”A-ZÁÉÍÓÚÑ])", part)
+
+        for sp in subparts:
+            sp = _cut_alias_phrases_pdf(sp)
+            sp = _join_dropped_initials_pdf(sp)
+            sp = (_clean_chunk(sp) or "").strip(" .,-;:")
+
+            if not sp:
+                continue
+            if _RE_DEMANDADO_NOISE.match(sp):
+                continue
+            if _RE_OTRO_PDF.match(sp):
+                continue
+
+            key = sp.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(sp)
+
+    return out
+
 def parse_arrendamiento_salas_block_v2(
     block: str,
     fecha_pub: str,
     num_boletin: int,
     num_pag: Optional[int] = None
 ) -> List[Dict]:
+
     text = _normalize_keep_newlines(block)
     text = unir_expedientes_partidos(text)
     if not text:
@@ -343,11 +661,10 @@ def parse_arrendamiento_salas_block_v2(
         if not RE_ARR.search(caso):
             continue
 
-        # ✅ Partir actor/resto usando el vs_m real (NO usando RE_VS.search(caso))
+        # ✅ Partir actor/resto usando el vs_m real
         vs_rel_start = vs_m.start() - case_start
         vs_rel_end = vs_m.end() - case_start
 
-        # Seguridad por si los offsets no caen dentro del segmento
         if vs_rel_start < 0 or vs_rel_end > len(caso):
             continue
 
@@ -360,15 +677,13 @@ def parse_arrendamiento_salas_block_v2(
             continue
 
         # ✅ VALIDACIÓN CLAVE:
-        # Arrend debe ocurrir ENTRE el vs (vs_rel_end) y el primer T. de este caso.
-        arr_rel = arr_pos - case_start                      # posición de Arrend dentro de `caso`
-        t_rel = vs_rel_end + mt.start()                     # posición de T. dentro de `caso`
+        arr_rel = arr_pos - case_start
+        t_rel = vs_rel_end + mt.start()
         if not (vs_rel_end < arr_rel < t_rel):
-            # Si no se cumple, significa que este vs/T son de otro caso (ej. Ejec. Merc.)
             continue
 
-        before_t = _clean_chunk(resto[:mt.start()])         # demandado + tipo
-        from_t = resto[mt.start():]                         # desde T. en adelante
+        before_t = _clean_chunk(resto[:mt.start()])  # demandado + tipo
+        from_t = resto[mt.start():]                  # desde T. en adelante
 
         # ✅ Otra validación: Arrend debe estar ANTES del T. en el tramo previo
         if not RE_ARR.search(before_t):
@@ -379,12 +694,12 @@ def parse_arrendamiento_salas_block_v2(
         demandado_raw = before_t
 
         tipo_m = None
-        tipo_matches = list(RE_TIPO_ARR.finditer(before_t))
+        tipo_matches = list(RE_TIPO_OBJETIVO.finditer(before_t))  # ✅ incluye Ejec. Merc
+
         if tipo_matches:
             tipo_m = tipo_matches[-1]
 
         if tipo_m:
-            # Si tu RE_TIPO_ARR trae grupo (?P<tipo>...), úsalo; si no, usa group(0)
             try:
                 tipo_juicio = _clean_chunk(tipo_m.group("tipo"))
             except Exception:
@@ -399,12 +714,15 @@ def parse_arrendamiento_salas_block_v2(
                 demandado_raw = _clean_chunk(before_t[:m_arr.start()])
 
         actor = _clean_actor_near_vs(actor_raw)
-        demandado = demandado_raw or None
+
+        # ✅ NUEVO: separar demandados + limpiar alias ("Quien también...", "y Otra(s)", etc.)
+        demandados = split_demandados_pdf(demandado_raw)
+        if not demandados:
+            demandados = [demandado_raw or None]
 
         # Estatus: Sent. o N Acdos.
         estatus = None
         num_estatus = None
-
         if re.search(r"\bSent\.\b", caso, flags=re.IGNORECASE):
             estatus = "Sent"
         else:
@@ -418,28 +736,40 @@ def parse_arrendamiento_salas_block_v2(
         if not expedientes:
             continue
 
-        for exp in expedientes:
-            reg = {
-                "id_expediente": exp,
-                "actor_demandante": actor or None,
-                "demandado": demandado,
-                "tipo_juicio": tipo_juicio,
-                "estatus": estatus,
-                "num_estatus": num_estatus,
-                "fecha_publicacion": fecha_pub,
-                "numero_boletin": num_boletin,
-                "numero_pagina": pagina_caso if pagina_caso is not None else pagina_final,
-                "sala": sala_civil,
-            }
+        # ✅ NUEVO: mapea demandado -> índice incremental ("demandado: 1", ...)
+        #      único por demandado dentro del caso (para no repetir por errores OCR)
+        dem_index = {}
+        idx = 1
+        for d in demandados:
+            k = (d or "").strip().lower()
+            if k and k not in dem_index:
+                dem_index[k] = idx
+                idx += 1
 
-            key = (
-                reg["id_expediente"], reg["actor_demandante"], reg["demandado"],
-                reg["tipo_juicio"], reg["estatus"], reg["fecha_publicacion"], reg["numero_boletin"],
-                reg["numero_pagina"], reg["sala"],
-            )
-            if key not in seen:
-                seen.add(key)
-                resultados.append(reg)
+        for exp in expedientes:
+            for idx_dem, dem in enumerate(demandados, start=1):
+                reg = {
+                    "id_expediente": exp,
+                    "actor_demandante": actor or None,
+                    "demandado": dem,
+                    "tipo_juicio": tipo_juicio,
+                    "estatus": estatus,
+                    "num_estatus": num_estatus,
+                    "fecha_publicacion": fecha_pub,
+                    "numero_boletin": num_boletin,
+                    "numero_pagina": pagina_caso if pagina_caso is not None else pagina_final,
+                    "sala": sala_civil,
+                    "conteo_demandados": f"demandado: {idx_dem}",
+                }
+
+                key = (
+                    reg["id_expediente"], reg["actor_demandante"], reg["demandado"],
+                    reg["tipo_juicio"], reg["estatus"], reg["fecha_publicacion"], reg["numero_boletin"],
+                    reg["numero_pagina"], reg["sala"], reg["conteo_demandados"],
+                )
+                if key not in seen:
+                    seen.add(key)
+                    resultados.append(reg)
 
     return resultados
 
