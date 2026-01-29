@@ -74,7 +74,6 @@ for fecha,l in externos:
                 cont +=1
         
         if expedientes != None or len(expedientes) > 0:
-            expedientes = enumerar_demandados_por_expediente(expedientes)
             cantidad_insercion = insertar_expedientes_bulk(expedientes)
 
         if cantidad_insercion > 0:

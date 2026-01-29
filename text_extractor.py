@@ -114,11 +114,6 @@ def _enriquecer_sala(m: re.Match, text: str) -> str:
 
     return raw
 
-def _clean_name_chunk(s: str) -> str:
-    s = s.strip(" .,-;:|")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
 RE_EXP_PARTIDO = re.compile(r"(\b\d{1,6}[/\-]\d{4}[/\-])\s*\n\s*(\d{3}\b)")
 
 def unir_expedientes_partidos(text: str) -> str:
@@ -138,16 +133,6 @@ RE_ITEM_ARREND = re.compile(
     r"(?P<num>\d{1,6})\s*[/\-]\s*(?P<anio>\d{4})\s*[/\-]\s*(?P<cons>\d{3})",
     re.IGNORECASE
 )
-
-# -----------------------------
-# Split demandados (OCR-friendly)
-# -----------------------------
-RE_CORP_COMMA_DELIM = re.compile(
-    r"(?P<suf>\b(?:S\.A\.P\.I\.?\s*de\s*C\.V\.|S\.A\.?\s*de\s*C\.V\.|S\.?\s*de\s*R\.L\.?\s*de\s*C\.V\.|"
-    r"S\.?\s*de\s*R\.L\.|S\.A\.|A\.C\.|S\.C\.|SC)\b)\s*,\s*(?=[A-ZÁÉÍÓÚÑ\"“‘])",
-    re.IGNORECASE
-)
-RE_Y_SPLIT = re.compile(r"\s+(?:y|e)\s+(?=[A-ZÁÉÍÓÚÑ\"“‘])", re.IGNORECASE)
 
 @dataclass
 class ParserState:
@@ -324,24 +309,6 @@ DESCRIPTORES_POST_SUF = (
     r")\b"
 )
 
-RE_CORP_COMMA_DELIM = re.compile(
-    rf"(?P<suf>\b(?:"
-    rf"S\.?\s*A\.?\s*P\.?\s*I\.?\s*de\s*C\.?\s*V\.?|"
-    rf"S\.?\s*A\.?\s*de\s*C\.?\s*V\.?|"
-    rf"S\.?\s*de\s*R\.?\s*L\.?\s*de\s*C\.?\s*V\.?|"
-    rf"S\.?\s*de\s*R\.?\s*L\.?|"
-    rf"S\.?\s*A\.?|SA|"
-    rf"A\.?\s*C\.?|"
-    rf"S\.?\s*C\.?|SC"
-    rf")\b)"
-    rf"\s*,\s*"
-    rf"(?!(?:{DESCRIPTORES_POST_SUF}))"     # ✅ si después viene "instituci..." o "divisi..." NO cortes
-    rf"(?=[A-ZÁÉÍÓÚÑ\"“‘])",
-    re.IGNORECASE
-)
-
-RE_Y_SPLIT = re.compile(r"\s+(?:y|e)\s+(?=[A-ZÁÉÍÓÚÑ\"“‘])", re.IGNORECASE)
-
 def _join_dropped_initials(s: str) -> str:
     """
     Repara casos OCR tipo: 'E spejel' -> 'Espejel'
@@ -352,69 +319,6 @@ def _join_dropped_initials(s: str) -> str:
         lambda m: m.group(1) + m.group(2),
         s
     )
-
-def split_demandados(demandado_raw: str) -> List[str]:
-    if not demandado_raw:
-        return []
-
-    s = demandado_raw
-
-    # Normaliza comillas/espacios
-    s = s.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
-    s = re.sub(r"\s+", " ", s).strip(" .;:-|")
-
-    # ✅ separa "yBravo" / "eInstituto" => "y Bravo" / "e Instituto"
-    s = re.sub(r"(?i)\b([ye])(?=[A-ZÁÉÍÓÚÑ])", r"\1 ", s)
-
-    # ✅ conserva solo lo anterior a "Quien También Se Ostenta..."
-    s = re.split(r"(?i)\bquien\s+tamb[ií]en\s+se\s+ostenta\b", s, maxsplit=1)[0].strip()
-
-    # ✅ separadores fuertes (listas reales)
-    s = re.sub(r"\s*;\s*", " | ", s)   # ; => separa demandados
-    s = re.sub(r"\s*\|\s*", " | ", s)
-
-    # Ruido típico
-    s = re.sub(r"\s+su\s+Sucesi[oó]n\b.*$", "", s, flags=re.IGNORECASE).strip()
-
-    # ✅ solo convierte coma en separador si NO viene descriptor OCR-friendly
-    s = RE_CORP_COMMA_DELIM.sub(r"\g<suf> | ", s)
-
-    # 1) split base por "|"
-    partes: List[str] = []
-    for chunk in [c.strip() for c in s.split("|") if c.strip()]:
-        # 2) split por "y/e" (lista)
-        for p in RE_Y_SPLIT.split(chunk):
-            q = p.strip(" \"'.,;:-")
-            q = re.sub(r"\s+", " ", q).strip()
-            if not q:
-                continue
-            if re.fullmatch(r"(?:y\s+)?otros?", q, flags=re.IGNORECASE):
-                continue
-            partes.append(q)
-
-    # ✅ NUEVO: unir fragmentos basura de OCR:
-    # - "n", "l", "smeralda", "spejel Morales" (empiezan con minúscula o son muy cortos)
-    merged: List[str] = []
-    for p in partes:
-        p = p.strip()
-        if not p:
-            continue
-        if merged and (len(p) <= 2 or re.match(r"^[a-záéíóúñ]", p)):
-            merged[-1] = (merged[-1] + " " + p).strip()
-        else:
-            merged.append(p)
-
-    # Limpieza final + dedupe manteniendo orden
-    out: List[str] = []
-    seen = set()
-    for x in merged:
-        x = _join_dropped_initials(x)
-        x = _clean_name_chunk(x)  # tu función existente
-        if x and x not in seen:
-            seen.add(x)
-            out.append(x)
-
-    return out
 
 def parse_arrendamiento_block(
     block: str,
@@ -492,7 +396,11 @@ def parse_arrendamiento_block(
         demandado_raw = _clean_name_chunk(resto[:m_tipo0.start()]) or ""
         demandados = split_demandados(demandado_raw)
         if not demandados:
-            demandados = [demandado_raw.strip() or None]
+            continue
+
+        # Mapa estable: demandado -> índice incremental (1..N) por caso (NO por expediente)
+        idx_map = {d: i + 1 for i, d in enumerate(demandados)}
+
 
         # ✅ sala por posición (si está en la página), si no, usa la última guardada
         tipo_abs_pos = case_start + vs_rel_end + m_tipo0.start()
@@ -530,6 +438,7 @@ def parse_arrendamiento_block(
                     estatus = "Acdo"
 
             for demandado in demandados:
+                conteo_demandados = f"demandado: {idx_map[demandado]}"
                 reg = {
                     "id_expediente": id_expediente,
                     "actor_demandante": actor,
@@ -544,12 +453,13 @@ def parse_arrendamiento_block(
                     # ✅ mantén ambos para no perderlo
                     "sala": sala_civil,
                     "juzgado": sala_civil,
+                    "conteo_demandados": conteo_demandados,
                 }
 
                 key = (
                     reg["id_expediente"], reg["actor_demandante"], reg["demandado"],
                     reg["tipo_juicio"], reg["estatus"], reg["num_estatus"],
-                    reg["sala"], reg["fecha_publicacion"], reg["numero_boletin"], reg["numero_pagina"]
+                    reg["sala"], reg["fecha_publicacion"], reg["numero_boletin"], reg["numero_pagina"], reg["conteo_demandados"]
                 )
 
                 if key not in seen:
@@ -614,36 +524,6 @@ def extract_from_full_text(full_text: str) -> List[Dict]:
 
     return results
 
-# def enumerar_demandados_por_expediente(registros: List[Dict]) -> List[Dict]:
-#     """
-#     Asigna conteo_demandados = índice incremental (1..N) para demandados únicos por id_expediente.
-#     - Si un demandado se repite dentro del mismo expediente, conserva el mismo número.
-#     - El orden es por primera aparición en la lista.
-#     """
-#     # exp -> { demandado : idx }
-#     idx_map = defaultdict(dict)
-#     # exp -> siguiente idx
-#     next_idx = defaultdict(lambda: 1)
-
-#     for r in registros:
-#         exp = (r.get("id_expediente") or "").strip()
-#         dem = (r.get("demandado") or "").strip()
-
-#         if not exp or not dem:
-#             r["conteo_demandados"] = None
-#             continue
-
-#         # Si ya existe ese demandado en ese expediente, reutiliza índice
-#         if dem in idx_map[exp]:
-#             r["conteo_demandados"] = idx_map[exp][dem]
-#         else:
-#             idx = next_idx[exp]
-#             idx_map[exp][dem] = idx
-#             r["conteo_demandados"] = idx
-#             next_idx[exp] = idx + 1
-
-#     return registros
-
 def enumerar_demandados_por_expediente(registros: List[Dict]) -> List[Dict]:
     """
     Asigna conteo_demandados = "demandado: N" (N incremental) para demandados únicos por id_expediente.
@@ -672,4 +552,170 @@ def enumerar_demandados_por_expediente(registros: List[Dict]) -> List[Dict]:
 
     return registros
 
+# --- CORTES DE "ALIAS" / "SE OSTENTA" / "ACOSTUMBRA USAR NOMBRE" ---
+RE_ALIAS_CUT = re.compile(
+    r"""
+    \b
+    (?:quien|qui[eé]n)                # quien / quién
+    \s+tamb[ií]en\s+                  # también
+    (?:                               # frases típicas
+        se\s+ostenta
+        |acostumbra\s+usar
+        |usa
+        |responde
+    )
+    (?:\s+(?:como|al|a|el|l)\s+nombre\s+de|\s+como|\s+el\s+nombre\s+de|\s+l\s+nombre\s+de)?  # OCR: "l nombre"
+    \b
+    .*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
+RE_CONOCIDO_COMO_CUT = re.compile(
+    r"""
+    \b
+    (?:anteriormente\s+conocid[oa]
+      |tamb[ií]en\s+conocid[oa]
+      |conocid[oa]
+      |identificad[oa]
+    )
+    \s+como
+    \b
+    .*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# --- "y Otra(s) / y Otro(s)" (no debe convertirse en demandado) ---
+RE_OTRO_TOKEN = re.compile(r"^(?:y\s+)?otr[oa]s?\.?$", re.IGNORECASE)
+
+# --- Separador por "y/e" entre demandados, SOLO si el siguiente parece nombre (Mayúscula/“") ---
+# Solo arregla OCR tipo: yBravo -> y Bravo / eInmobiliaria -> e Inmobiliaria
+# PERO solo si lo que sigue es Nombre con mayúscula real + minúscula real (no "en", "el", etc)
+RE_YBRAVO_FIX = re.compile(
+    r'(?i)\b([ye])(?=(?-i:[A-ZÁÉÍÓÚÑ])[a-záéíóúñ])'
+)
+
+# Split por " y " / " e " SOLO si lo que sigue parece nombre real
+RE_Y_SPLIT = re.compile(
+    r'\s+(?:y|e)\s+(?=(?:["“‘]?\s*)?(?-i:[A-ZÁÉÍÓÚÑ])[a-záéíóúñ])',
+    re.IGNORECASE
+)
+
+# Corta alias en cuanto aparezca "Quien también ..."
+RE_ALIAS_QUIEN_TAMBIEN = re.compile(r'(?i)\bquien\s+tambi[eé]n\b.*$')
+
+# Corta alias: "conocido como", "anteriormente conocido como"
+RE_ALIAS_CONOCIDO = re.compile(r'(?i)\b(?:anteriormente\s+)?conocid[oa]\s+como\b.*$')
+
+# Quita cola " y Otro(s)/Otra(s)" al final
+RE_OTROS_TAIL = re.compile(r'(?i)\s+y\s+(?:otro|otra|otros|otras)\b.*$')
+
+# --- Sufijos corporativos (tolerante a OCR) ---
+_CORP = r"(?:S\.?\s*A\.?|S\.?\s*de\s*R\.?\s*L\.?|A\.?\s*C\.?|S\.?\s*C\.?|SAPI|S\.?\s*A\.?\s*P\.?\s*I\.?|I\.?\s*A\.?\s*P\.?)"
+_CORP_TAIL = r"(?:\s*(?:de\s+)?(?:C\.?\s*V\.?|R\.?\s*L\.?))?"
+_CORP_SUFFIX = rf"(?:{_CORP}{_CORP_TAIL})"
+
+# No partir por coma cuando lo que sigue es descriptor del MISMO demandado
+_CORP_NO_SPLIT_NEXT = r"(?:Instituci[oó]n|Institucion|Divisi[oó]n|Division|Grupo|Financier|Fideicomiso|Fiduciari|como|Notario|P[úu]blico|Director|Gerente)\b"
+
+# Coma “separadora” después de sufijo corporativo, pero NO si sigue descriptor típico
+RE_CORP_COMMA_DELIM = re.compile(
+    rf"(?P<suf>\b{_CORP_SUFFIX}\b)\s*,\s*(?=(?!{_CORP_NO_SPLIT_NEXT})[A-ZÁÉÍÓÚÑ\"“])",
+    re.IGNORECASE,
+)
+
+def _cut_alias_phrases(s: str) -> str:
+    if not s:
+        return s
+
+    s = RE_ALIAS_QUIEN_TAMBIEN.sub("", s).strip()
+    s = RE_ALIAS_CONOCIDO.sub("", s).strip()
+
+    # también corta cosas tipo "su Sucesión" si te conviene (opcional)
+    s = re.sub(r"(?i)\s+su\s+sucesi[oó]n\b.*$", "", s).strip()
+
+    # limpia puntitos/espacios finales
+    s = re.sub(r"\s{2,}", " ", s).strip(" .;,-")
+    return s
+
+def _join_dropped_initials(s: str) -> str:
+    """
+    Repara OCR tipo:
+    'E spejel' -> 'Espejel'
+    'e spejel' -> 'Espejel'
+    """
+    def _fix(m: re.Match) -> str:
+        return m.group(1).upper() + m.group(2)
+    return re.sub(r"\b([A-Za-zÁÉÍÓÚÑáéíóúñ])\s+([a-záéíóúñ]{3,})\b", _fix, s)
+
+def _clean_name_chunk(s: str) -> str:
+    """Tu limpiador actual (si ya lo tienes, NO lo dupliques)."""
+    s = re.sub(r"\s+", " ", (s or "")).strip()
+    s = s.strip(" ,;.")
+    return s
+
+def split_demandados(demandado_raw: str) -> List[str]:
+    """
+    Devuelve lista de demandados:
+    - corta 'Quien también ...', '... conocido como ...'
+    - ignora 'y Otra(s)/Otro(s)'
+    - separa por ';' y por 'y/e' (cuando procede)
+    - evita romper corporativos por comas tipo: '..., S.A., Institución de ...'
+    """
+    s = _clean_name_chunk(demandado_raw)
+    if not s:
+        return []
+
+    # 1) corta alias a nivel global (por si viene al final del demandado completo)
+    s = _cut_alias_phrases(s)
+
+    # 2) ✅ FIX: normaliza OCR "yBravo" -> "y Bravo" / "eInmobiliaria" -> "e Inmobiliaria"
+    #    sin romper "en", "el", "Espejel", etc.
+    s = RE_YBRAVO_FIX.sub(r"\1 ", s)
+
+    # 3) ✅ elimina cola tipo " y Otra(s)/Otro(s)" pegada al final (antes de split)
+    s = RE_OTROS_TAIL.sub("", s).strip()
+
+    # 4) trata ';' como separador fuerte
+    parts_semicolon = [p.strip() for p in re.split(r"\s*;\s*", s) if p.strip()]
+
+    out: List[str] = []
+    seen = set()
+
+    for p in parts_semicolon:
+        # 5) evita partir corporativos por coma “interna”
+        #    Ej: "Deutsche Bank México, S.A., Institución..." => NO separar en demandados
+        p = RE_CORP_COMMA_DELIM.sub(lambda m: f"{m.group('suf')} | ", p)
+
+        # 6) split por el delimitador artificial " | "
+        chunks = [c.strip() for c in p.split("|") if c.strip()]
+
+        for c in chunks:
+            c = _cut_alias_phrases(c)
+            c = _join_dropped_initials(c)
+            c = _clean_name_chunk(c)
+
+            if not c:
+                continue
+            if RE_OTRO_TOKEN.fullmatch(c):
+                continue
+
+            # 7) split por 'y/e' cuando realmente separa demandados
+            sub = [x.strip() for x in RE_Y_SPLIT.split(c) if x.strip()]
+            for q in sub:
+                q = _cut_alias_phrases(q)
+                q = _join_dropped_initials(q)
+                q = _clean_name_chunk(q)
+
+                if not q:
+                    continue
+                if RE_OTRO_TOKEN.fullmatch(q):
+                    continue
+
+                key = q.lower()
+                if key not in seen:
+                    seen.add(key)
+                    out.append(q)
+
+    return out
