@@ -3,6 +3,7 @@ import unicodedata
 from typing import List, Dict, Optional
 from pypdf import PdfReader
 from pathlib import Path
+import bisect
 
 RE_VS = re.compile(r"\bvs\.?\b", re.IGNORECASE)
 RE_ARR = re.compile(r"\barrend(?:\.|amiento)?\b", re.IGNORECASE)
@@ -17,10 +18,17 @@ RE_EXP_TAIL = re.compile(r"\b(?:y|,)\s*(\d{3})\b", re.IGNORECASE)
 
 RE_T_DOT = re.compile(r"\bT\.\s*", re.IGNORECASE)
 
-RE_TIPO_ARR = re.compile(
-    r"(?P<tipo>(?:Controv\.?\s*)?(?:de\s+)?Arrend(?:\.|amiento)?)",
+RE_TIPO = re.compile(
+    r"(?P<tipo>"
+    r"(?:"
+    r"Controv\.?\s*(?:de\s+)?Arrend(?:\.|amiento)?"
+    r"|Controv\.?\s*Arrend\.?"
+    r"|Ejec\.?\s*Merc\.?(?:antil)?"
+    r")"
+    r")",
     re.IGNORECASE
 )
+
 RE_PAGE_HDR = re.compile(r"\bPAGINA\s+(\d+)\s*/\s*(\d+)\b", re.IGNORECASE)
 
 RE_NUM_BOLETIN = re.compile(
@@ -43,7 +51,16 @@ RE_CASE_TERMINATOR = re.compile(
 RE_EXP_HYPH = re.compile(r"\b\d{1,6}[-/]\d{4}[-/]\d{3}\b")  # 171-2017-006, 804-2019-001
 RE_TAIL_MARKERS = re.compile(r"\b(?:Cuad\.|Amp\.|Acdos?|Acdo|Sent\.?|Pon\.?)\b", re.IGNORECASE)
 
-import re
+RE_EXP_FLEX = re.compile(
+    r"\bT\.?\s*"
+    r"(?:(?P<pref>[A-ZÁÉÍÓÚÑ]{1,4})\.?\s*)?"
+    r"(?P<num>\d{1,6})\s*(?P<sep1>[-/])\s*(?P<anio>\d{4})"
+    r"(?:\s*(?P<sep2>[-/])\s*(?P<seq>\d{1,3}))?"
+    r"\b",
+    re.IGNORECASE
+)
+
+
 
 RE_SEPARADOR = re.compile(r"=+\s*", re.IGNORECASE)
 RE_PAGINA_HDR = re.compile(r"\bPAGINA\s+\d+\s*/\s*\d+\b", re.IGNORECASE)
@@ -190,23 +207,34 @@ def _clean_chunk(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s.strip(" .;:-")
 
-def _extract_expedientes_sala(rest: str) -> List[str]:
-    exps: List[str] = []
-    for m in RE_EXP_FULL.finditer(rest):
-        num, anio, folio = m.group(1), m.group(2), m.group(3)
-        exps.append(f"T. {num}-{anio}-{folio}")
-
-        tail_zone = rest[m.end(): m.end() + 70]
-        for t in RE_EXP_TAIL.finditer(tail_zone):
-            folio2 = t.group(1)
-            exps.append(f"T. {num}-{anio}-{folio2}")
-
+def _extract_expedientes_sala(s: str) -> List[str]:
+    out: List[str] = []
     seen = set()
-    out = []
-    for e in exps:
-        if e not in seen:
-            seen.add(e)
-            out.append(e)
+
+    for m in RE_EXP_FLEX.finditer(s or ""):
+        pref = (m.group("pref") or "").strip()
+        num = m.group("num")
+        anio = m.group("anio")
+        seq = m.group("seq")
+        sep1 = m.group("sep1") or "-"
+        sep2 = m.group("sep2") or sep1
+
+        if seq:
+            seq = seq.zfill(3)
+            core = f"{num}{sep1}{anio}{sep2}{seq}"
+        else:
+            core = f"{num}{sep1}{anio}"
+
+        if pref:
+            exp = f"T. {pref} {core}"
+        else:
+            exp = f"T. {core}"
+
+        key = exp.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(exp)
+
     return out
 
 RE_STATUS_END = re.compile(r"\b(?:\d{1,3}\s*(?:acdos?|acdo)\.?\b|sent\.)", re.IGNORECASE)
@@ -619,15 +647,14 @@ def parse_arrendamiento_salas_block_v2(
     if not text:
         return []
 
-    # Si no existe ninguna referencia a Arrend en el bloque, salimos
-    if not RE_ARR.search(text):
+    # ✅ ahora buscamos Arrend + Ejec Merc
+    if not RE_TIPO.search(text):
         return []
 
-    # Página del bloque (si el bloque trae el header PAGINA X/Y)
+    # Página del bloque (si el bloque trae header PAGINA X/Y)
     page_from_text = _extract_page_from_block(text)
     pagina_final = page_from_text if page_from_text is not None else num_pag
 
-    # No sobre-escribir num_boletin si aquí no viene el header
     b = extraer_numero_boletin(text)
     if b is not None:
         num_boletin = b
@@ -635,122 +662,72 @@ def parse_arrendamiento_salas_block_v2(
     resultados: List[Dict] = []
     seen = set()
 
-    # Para cada ocurrencia de Arrend...
-    for arr_m in RE_ARR.finditer(text):
-        arr_pos = arr_m.start()
+    vs_all = list(RE_VS.finditer(text))
+    if not vs_all:
+        return []
 
-        pagina_caso = _pagina_para_pos(text, arr_pos)
-        sala_civil = _sala_civil_para_pos(text, arr_pos)
+    vs_starts = [m.start() for m in vs_all]
 
-        # vs más cercano antes del Arrend
-        vs_list = list(RE_VS.finditer(text, 0, arr_pos))
-        if not vs_list:
+    # Recorremos CADA ocurrencia del tipo (Arrend o Ejec Merc)
+    for tipo_m in RE_TIPO.finditer(text):
+        tipo_pos = tipo_m.start()
+
+        # vs más cercano antes de este tipo
+        j = bisect.bisect_right(vs_starts, tipo_pos) - 1
+        if j < 0:
             continue
-        vs_m = vs_list[-1]  # ESTE es el vs "correcto" para esta ocurrencia de Arrend
 
-        # Límites del caso (tus helpers)
+        vs_m = vs_all[j]
         case_start = _case_start_before_vs(text, vs_m.start())
-        case_end = _case_end_from_vs(text, case_start, vs_m.start())
+        case_end = vs_all[j + 1].start() if (j + 1) < len(vs_all) else len(text)
 
-        # Segmento "caso"
-        caso = text[case_start:case_end].strip()
-        if not caso:
+        if not (case_start <= tipo_pos < case_end):
             continue
 
-        # Debe contener Arrend (aunque sea por ruido, doble check)
-        if not RE_ARR.search(caso):
-            continue
+        # actor/demandado raw (entre vs y tipo)
+        actor_raw = text[case_start:vs_m.start()]
+        demandado_raw = text[vs_m.end():tipo_pos]
 
-        # ✅ Partir actor/resto usando el vs_m real
-        vs_rel_start = vs_m.start() - case_start
-        vs_rel_end = vs_m.end() - case_start
+        actor = _clean_actor_near_vs(actor_raw) or None
 
-        if vs_rel_start < 0 or vs_rel_end > len(caso):
-            continue
-
-        actor_raw = caso[:vs_rel_start]
-        resto = caso[vs_rel_end:]
-
-        # Ubicar primer T.
-        mt = RE_T_DOT.search(resto)
-        if not mt:
-            continue
-
-        # ✅ VALIDACIÓN CLAVE:
-        arr_rel = arr_pos - case_start
-        t_rel = vs_rel_end + mt.start()
-        if not (vs_rel_end < arr_rel < t_rel):
-            continue
-
-        before_t = _clean_chunk(resto[:mt.start()])  # demandado + tipo
-        from_t = resto[mt.start():]                  # desde T. en adelante
-
-        # ✅ Otra validación: Arrend debe estar ANTES del T. en el tramo previo
-        if not RE_ARR.search(before_t):
-            continue
-
-        # Tipo/demandado (Controv. Arrend.)
-        tipo_juicio: Optional[str] = None
-        demandado_raw = before_t
-
-        tipo_m = None
-        tipo_matches = list(RE_TIPO_OBJETIVO.finditer(before_t))  # ✅ incluye Ejec. Merc
-
-        if tipo_matches:
-            tipo_m = tipo_matches[-1]
-
-        if tipo_m:
-            try:
-                tipo_juicio = _clean_chunk(tipo_m.group("tipo"))
-            except Exception:
-                tipo_juicio = _clean_chunk(tipo_m.group(0))
-
-            demandado_raw = _clean_chunk(before_t[:tipo_m.start()])
-        else:
-            # Fallback: si hay Arrend pero OCR dañó el match del tipo
-            tipo_juicio = "Arrend"
-            m_arr = RE_ARR.search(before_t)
-            if m_arr:
-                demandado_raw = _clean_chunk(before_t[:m_arr.start()])
-
-        actor = _clean_actor_near_vs(actor_raw)
-
-        # ✅ NUEVO: separar demandados + limpiar alias ("Quien también...", "y Otra(s)", etc.)
+        # ✅ split demandados + alias cuts + y Otros
         demandados = split_demandados_pdf(demandado_raw)
         if not demandados:
-            demandados = [demandado_raw or None]
+            d0 = _clean_chunk(demandado_raw)
+            demandados = [d0] if d0 else [None]
 
-        # Estatus: Sent. o N Acdos.
-        estatus = None
-        num_estatus = None
-        if re.search(r"\bSent\.\b", caso, flags=re.IGNORECASE):
-            estatus = "Sent"
-        else:
-            m_acdo = re.search(r"\b(\d{1,3})\s*(acdos?|acdo)\.?\b", caso, flags=re.IGNORECASE)
-            if m_acdo:
-                num_estatus = int(m_acdo.group(1))
-                estatus = "Acdo"
+        tipo_juicio = _clean_chunk(tipo_m.group("tipo")).rstrip(".") if tipo_m.group("tipo") else None
 
-        # Expedientes (solo de este caso, desde T. en adelante)
-        expedientes = _extract_expedientes_sala(from_t)
+        # sala/pagina por posición del tipo
+        pagina_caso = _pagina_para_pos(text, tipo_pos)
+        sala_civil = _sala_civil_para_pos(text, tipo_pos)
+
+        # Segmento “línea” del tipo hasta el primer estatus (o ventana corta)
+        st = RE_STATUS.search(text, tipo_pos, case_end)
+        line_end = st.end() if st else min(tipo_pos + 900, case_end)
+        seg = text[tipo_pos:line_end]
+
+        # expedientes SOLO de esta línea
+        expedientes = _extract_expedientes_sala(seg)
         if not expedientes:
             continue
 
-        # ✅ NUEVO: mapea demandado -> índice incremental ("demandado: 1", ...)
-        #      único por demandado dentro del caso (para no repetir por errores OCR)
-        dem_index = {}
-        idx = 1
-        for d in demandados:
-            k = (d or "").strip().lower()
-            if k and k not in dem_index:
-                dem_index[k] = idx
-                idx += 1
+        # estatus
+        estatus = None
+        num_estatus = None
+        if re.search(r"\bSent\.\b", seg, flags=re.IGNORECASE):
+            estatus = "Sent"
+        else:
+            m_acdo = re.search(r"\b(\d{1,3})\s*(acdos?|acdo)\.?\b", seg, flags=re.IGNORECASE)
+            if m_acdo:
+                num_estatus = int(m_acdo.group(1))
+                estatus = "Acdo"
 
         for exp in expedientes:
             for idx_dem, dem in enumerate(demandados, start=1):
                 reg = {
                     "id_expediente": exp,
-                    "actor_demandante": actor or None,
+                    "actor_demandante": actor,
                     "demandado": dem,
                     "tipo_juicio": tipo_juicio,
                     "estatus": estatus,
@@ -759,14 +736,17 @@ def parse_arrendamiento_salas_block_v2(
                     "numero_boletin": num_boletin,
                     "numero_pagina": pagina_caso if pagina_caso is not None else pagina_final,
                     "sala": sala_civil,
+                    "juzgado": sala_civil,
                     "conteo_demandados": f"demandado: {idx_dem}",
                 }
 
                 key = (
                     reg["id_expediente"], reg["actor_demandante"], reg["demandado"],
-                    reg["tipo_juicio"], reg["estatus"], reg["fecha_publicacion"], reg["numero_boletin"],
-                    reg["numero_pagina"], reg["sala"], reg["conteo_demandados"],
+                    reg["tipo_juicio"], reg["estatus"], reg["num_estatus"],
+                    reg["fecha_publicacion"], reg["numero_boletin"], reg["numero_pagina"],
+                    reg.get("sala"), reg["conteo_demandados"]
                 )
+
                 if key not in seen:
                     seen.add(key)
                     resultados.append(reg)
@@ -786,7 +766,7 @@ def extraer_texto_pypdf_con_paginas(pdf_path: str) -> str:
             paginas_con_texto += 1
 
         partes.append(
-            f"\n{'='*80}\nPAGINA {i+2}/{total+2}\n{'='*80}\n{texto_pag}\n"
+            f"\n{'='*80}\nPAGINA {i}/{total}\n{'='*80}\n{texto_pag}\n"
         )
 
     partes.append(
@@ -796,6 +776,7 @@ def extraer_texto_pypdf_con_paginas(pdf_path: str) -> str:
     )
 
     return "".join(partes)
+
 
 RE_PAGE_HDR = re.compile(r"\bPAGINA\s+(\d+)\s*/\s*(\d+)\b", re.IGNORECASE)
 

@@ -49,16 +49,30 @@ for fecha,l in externos:
 
                 if debug:
                     textos.append(texto)
-                    if contador == inicio_columnas+15:
+                    if contador == 50:
                         break
                 contador+=1
         else:
             direccion = extraer_pdf_source(html = obtener_html(l))
             path_salida = descargar_pdf(direccion, f"boletin_{fecha.isoformat()}.pdf")
             texto = extraer_texto_pypdf_con_paginas(path_salida)
+            reader = PdfReader(path_salida)
+            print("Total páginas PDF:", len(reader.pages))
+
+            print("Total headers en texto:", texto.count("PAGINA "))
+            print("Longitud del texto (chars):", len(texto))
+
+            vacias = 0
+            for chunk in texto.split("PAGINA ")[1:]:
+                # chunk empieza como "i/total\n====\n<contenido>"
+                contenido = chunk.split("\n", 3)[-1].strip()
+                if not contenido:
+                    vacias += 1
+
+            print("Páginas vacías (sin texto extraído):", vacias)
             eliminar_pdf(path_salida) 
             contador = extraer_total_paginas(texto)
-            texto_limpio = limpiar_ruido_boletin(texto)
+            print(texto.split("RESUMEN")[-1]) 
             expedientes.extend(parse_arrendamiento_salas_block_v2(texto, fecha.isoformat(), 38, 2))
         if debug:
             cont = 1
