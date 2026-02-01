@@ -54,11 +54,6 @@ def _extract_expedientes(text: str) -> List[str]:
 
     return out
 
-RE_TIPO = re.compile(
-    r"(Controv\.\s*de\s*Arrendamiento|Especial\s*de\s*Arrendamiento\s*Oral)",
-    re.IGNORECASE
-)
-
 RE_STATUS = re.compile(r"\b(?:Acdo|Acdos|Acuerdo|Acuerdos|Sent|Sentencia|Sentencias)\.?\b", re.IGNORECASE)
 
 RE_CASE_BOUNDARY = re.compile(
@@ -177,6 +172,23 @@ def actualizar_ultima_sala(text: str, state: ParserState) -> None:
 
 RE_VS = re.compile(r"\bvs\.?\b", re.IGNORECASE)
 RE_ARR = re.compile(r"\bArrend(?:\.|amiento)\b", re.IGNORECASE)
+
+RE_TIPO = re.compile(
+    r"(?P<tipo>"
+    r"(?:\w{2,15}\s*[-–—]\s*)?"                       # prefijo opcional: Cnpeyf-
+    r"(?:Controv\.?\s*(?:de\s+)?Arrend(?:\.|amiento)" # Controv Arrend
+    r"|Especial\s*de\s*Arrendamiento\s*Oral"          # Especial Arrend Oral
+    r"|Ejec\.?\s*Merc\.?)"                            # Ejec Merc
+    r")(?=\W|$)",
+    re.IGNORECASE
+)
+
+RE_TIPO_CASO = re.compile(
+    r"(Controv\.?\s*(?:de\s+)?Arrend(?:\.|amiento)"
+    r"|Ejec\.?\s*Merc\.?)",
+    re.IGNORECASE
+)
+
 
 # Solo aceptamos tipos completos (si no está completo -> se omite)
 RE_TIPO_ARR_ANY = re.compile(
@@ -334,8 +346,11 @@ def parse_arrendamiento_block(
     # ✅ actualiza estado con la sala si aparece en esta página
     actualizar_ultima_sala(text, state)
 
-    if not RE_ARR.search(text):
+    # Si no hay tipo objetivo (Arrend o Ejec. Merc.), salimos
+    # (fallback: si OCR rompe el match del tipo pero sí aparece 'Arrend')
+    if not (RE_TIPO.search(text)):
         return []
+
 
     resultados: List[Dict] = []
     seen = set()
@@ -370,7 +385,7 @@ def parse_arrendamiento_block(
         caso = text[case_start:case_end].strip()
 
         # ✅ si no hay Arrend en el caso, no lo proceses
-        if not caso or not RE_ARR.search(caso):
+        if not caso or not RE_TIPO.search(caso):
             continue
 
         vs_rel_start = vs_m.start() - case_start
@@ -382,7 +397,7 @@ def parse_arrendamiento_block(
         resto = caso[vs_rel_end:]
 
         # ✅ Tipo completo (Especial/Controv + Arrend. / Arrendamiento)
-        m_tipo0 = RE_TIPO_ARR_ANY.search(resto)
+        m_tipo0 = RE_TIPO.search(resto)
         if not m_tipo0:
             continue
 
@@ -512,8 +527,9 @@ def extract_from_full_text(full_text: str) -> List[Dict]:
     seen = set()
 
     for chunk in split_into_case_chunks(full_text):
-        if not RE_ARR.search(chunk):
+        if not (RE_TIPO.search(chunk)):
             continue
+
 
         regs = parse_arrendamiento_block(chunk)
         for r in regs:
