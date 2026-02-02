@@ -212,7 +212,8 @@ def extraer_fecha_y_numero_boletin(texto_ocr: str):
     patron_fecha = re.compile(
         r"\b(?:lunes|martes|miercoles|jueves|viernes|sabado|domingo)?\s*"
         r"(\d{1,2})\s*de\s*"
-        r"(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)\s*de\s*"
+        r"(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)\s*"
+        r"(?:de|del)\s*"
         r"(\d{4})\b"
     )
     m = patron_fecha.search(t)
@@ -224,9 +225,29 @@ def extraer_fecha_y_numero_boletin(texto_ocr: str):
         fecha = date(anio, MESES_CONVERT[mes_txt], dia)
 
     # 2) Extraer "Num 3" (Num, Núm, Num., Núm., etc.)
-    patron_num = re.compile(r"\bnu[mn]\.?\s*(\d{1,4})\b")  # tolera OCR: num/nun
-    n = patron_num.search(t)
-    num = int(n.group(1)) if n else None
+    patron_no_cerca_boletin = re.compile(
+        r"\bboletin\b.*?\b(?:no|nº|n°|num|numero|núm|nume)\.?\s*[:\-]?\s*(\d{1,4})\b"
+    )
+    patron_no_cerca_tomo = re.compile(
+        r"\btomo\b.*?\b(?:no|nº|n°|num|numero|núm|nume)\.?\s*[:\-]?\s*(\d{1,4})\b"
+    )
+
+    num = None
+    m1 = patron_no_cerca_boletin.search(t)
+    if m1:
+        num = int(m1.group(1))
+    else:
+        m2 = patron_no_cerca_tomo.search(t)
+        if m2:
+            num = int(m2.group(1))
+        else:
+            # fallback: "No. 17" pero evitando "no publicado"
+            patron_no_fallback = re.compile(
+                r"\b(?:no|nº|n°)\.?\s*(\d{1,4})\b"
+            )
+            mf = patron_no_fallback.search(t)
+            if mf and "no publ" not in t[:mf.start() + 20]:
+                num = int(mf.group(1))
 
     return fecha, num
 
