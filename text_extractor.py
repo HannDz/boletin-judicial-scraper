@@ -22,38 +22,6 @@ def _fix_year_ocr(year: str) -> str:
         return "202" + y[2]
     return y
 
-def _extract_expedientes(text: str) -> List[str]:
-    """Extrae expedientes en formatos:
-       - T. In 1835/2025/001
-       - T. 615-2022-002
-       - T. 1129-2022
-       - tolera saltos de línea y OCR
-    """
-    out: List[str] = []
-    seen = set()
-
-    for m in RE_EXP.finditer(text):
-        pref = (m.group("pref") or "").strip()
-        num  = m.group("num").strip()
-
-        if m.group("anio_slash"):
-            anio = m.group("anio_slash").strip()
-            seq  = m.group("seq_slash").strip().zfill(3)
-            exp = f"T. {pref} {num}/{anio}/{seq}".strip() if pref else f"T. {num}/{anio}/{seq}"
-        else:
-            anio = _fix_year_ocr(m.group("anio_h"))
-            seq  = m.group("seq_h")
-            if seq:
-                exp = f"T. {num}-{anio}-{seq.strip().zfill(3)}"
-            else:
-                exp = f"T. {num}-{anio}"
-
-        if exp not in seen:
-            seen.add(exp)
-            out.append(exp)
-
-    return out
-
 RE_STATUS = re.compile(r"\b(?:Acdo|Acdos|Acuerdo|Acuerdos|Sent|Sentencia|Sentencias)\.?\b", re.IGNORECASE)
 
 RE_CASE_BOUNDARY = re.compile(
@@ -225,7 +193,6 @@ RE_SALA_CIVIL = re.compile(
 # Une expedientes partidos por salto de línea
 RE_EXP_SALTO = re.compile(r"(\d{1,6}\s*[/\-]\s*\d{4}\s*[/\-])\s*\n\s*(\d{1,3}\b)")
 
-
 def _clean_chunk(s: str) -> str:
     if s is None:
         return ""
@@ -244,11 +211,6 @@ def _normalize_keep_newlines_ocr(text: str) -> str:
     text = "\n".join(line.strip() for line in text.split("\n"))
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
-
-
-def _compact_digits(s: str) -> str:
-    return re.sub(r"\s+", "", s or "")
-
 
 def _unir_expedientes_partidos(text: str) -> str:
     return RE_EXP_SALTO.sub(r"\1\2", text)
@@ -289,14 +251,12 @@ def _safe_case_start(text: str, vs_start: int, start: int) -> int:
 
     return start + last_vs.end()
 
-
 # ✅ índice de salas: posiciones + valores
 def _build_sala_index(text: str):
     matches = list(RE_SALA_CIVIL.finditer(text))
     starts = [m.start() for m in matches]
     values = [m.group(0).strip() for m in matches]
     return starts, values
-
 
 def _sala_para_pos(starts, values, pos: int) -> Optional[str]:
     # equivalente a bisect_left sin import extra (N pequeño normalmente)
@@ -641,6 +601,18 @@ RE_CORP_COMMA_DELIM = re.compile(
     re.IGNORECASE,
 )
 
+# Palabras que indican que la coma NO separa demandados (son parte del mismo nombre corporativo)
+DESCRIPTORES_POST_COMMA = r"(?:Sociedad|An[oó]nima|Instituci[oó]n|Banca|M[uú]ltiple|Grupo|Financier\w*|Fideicomis\w*|Fiduciari\w*|Sofom|Notario|P[úu]blico|Director|Gerente)\b"
+
+# Coma separadora “real” (lista de demandados), SOLO si lo que sigue parece nombre/entidad
+# y NO es un descriptor corporativo ni abreviatura tipo S.A., A.C., etc.
+RE_COMMA_PARTY_SPLIT = re.compile(
+    rf",\s+(?=(?!{DESCRIPTORES_POST_COMMA})"
+    rf"(?!S\.?\s*A\.?\b)(?!A\.?\s*C\.?\b)(?!S\.?\s*C\.?\b)"
+    rf"(?-i:[A-ZÁÉÍÓÚÑ])[a-záéíóúñ])",
+    re.IGNORECASE
+)
+
 def _cut_alias_phrases(s: str) -> str:
     if not s:
         return s
@@ -700,38 +672,39 @@ def split_demandados(demandado_raw: str) -> List[str]:
     seen = set()
 
     for p in parts_semicolon:
-        # 5) evita partir corporativos por coma “interna”
-        #    Ej: "Deutsche Bank México, S.A., Institución..." => NO separar en demandados
         p = RE_CORP_COMMA_DELIM.sub(lambda m: f"{m.group('suf')} | ", p)
 
-        # 6) split por el delimitador artificial " | "
-        chunks = [c.strip() for c in p.split("|") if c.strip()]
+        p = RE_COMMA_PARTY_SPLIT.sub(" ; ", p)
 
-        for c in chunks:
-            c = _cut_alias_phrases(c)
-            c = _join_dropped_initials(c)
-            c = _clean_name_chunk(c)
+        p_parts = [x.strip() for x in re.split(r"\s*;\s*", p) if x.strip()]
 
-            if not c:
-                continue
-            if RE_OTRO_TOKEN.fullmatch(c):
-                continue
+        for pp in p_parts:
+            chunks = [c.strip() for c in pp.split("|") if c.strip()]
 
-            # 7) split por 'y/e' cuando realmente separa demandados
-            sub = [x.strip() for x in RE_Y_SPLIT.split(c) if x.strip()]
-            for q in sub:
-                q = _cut_alias_phrases(q)
-                q = _join_dropped_initials(q)
-                q = _clean_name_chunk(q)
+            for c in chunks:
+                c = _cut_alias_phrases(c)
+                c = _join_dropped_initials(c)
+                c = _clean_name_chunk(c)
 
-                if not q:
+                if not c:
                     continue
-                if RE_OTRO_TOKEN.fullmatch(q):
+                if RE_OTRO_TOKEN.fullmatch(c):
                     continue
 
-                key = q.lower()
-                if key not in seen:
-                    seen.add(key)
-                    out.append(q)
+                sub = [x.strip() for x in RE_Y_SPLIT.split(c) if x.strip()]
+                for q in sub:
+                    q = _cut_alias_phrases(q)
+                    q = _join_dropped_initials(q)
+                    q = _clean_name_chunk(q)
+
+                    if not q:
+                        continue
+                    if RE_OTRO_TOKEN.fullmatch(q):
+                        continue
+
+                    key = q.lower()
+                    if key not in seen:
+                        seen.add(key)
+                        out.append(q)
 
     return out
