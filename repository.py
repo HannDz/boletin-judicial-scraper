@@ -1,6 +1,76 @@
 from sqlalchemy import text
-from datetime import date
+from datetime import date, datetime
 from db import engine  
+# repository.py
+from sqlalchemy.exc import IntegrityError, DataError, OperationalError, DBAPIError
+import os
+
+def _append_db_error_txt(path: str, err: Exception, row: dict):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write("\n" + "="*120 + "\n")
+        f.write(f"TS: {datetime.now().isoformat(timespec='seconds')}\n")
+        f.write(f"ERROR: {type(err).__name__}: {str(err)}\n")
+        # lo mínimo útil para re-procesar
+        f.write(f"id_expediente: {row.get('id_expediente')}\n")
+        f.write(f"sala: {row.get('sala')}\n")
+        f.write(f"actor: {row.get('actor_demandante')}\n")
+        f.write(f"demandado: {row.get('demandado')}\n")
+        f.write(f"tipo: {row.get('tipo_juicio')}\n")
+        f.write(f"fecha_publicacion: {row.get('fecha_publicacion')}\n")
+        f.write(f"numero_boletin: {row.get('numero_boletin')}\n")
+        f.write(f"numero_pagina: {row.get('numero_pagina')}\n")
+        f.write(f"estatus: {row.get('estatus')}\n")
+        f.write(f"conteo_demandados: {row.get('conteo_demandados')}\n")
+
+def insertar_expedientes_bulk(
+    registros: list[dict],
+    batch_size: int = 1000,
+    error_txt: str = "logs/db_insert_errors.txt"
+) -> int:
+    """
+    Inserta en bulk sin romper el flujo:
+    - intenta por batch
+    - si falla batch -> fallback fila por fila con SAVEPOINT
+    - registra errores a TXT y continúa
+    """
+    registros_norm = [normalizar_registro(r) for r in registros]
+    total_insertadas = 0
+
+    # OJO: NO uses un solo engine.begin para todo,
+    # porque una excepción deja la transacción en estado inválido.
+    with engine.connect() as conn:
+        for i in range(0, len(registros_norm), batch_size):
+            batch = registros_norm[i:i + batch_size]
+
+            # 1) intento rápido por batch en su propia transacción
+            try:
+                with conn.begin():
+                    result = conn.execute(SQL_INSERT_EXPEDIENTES, batch)
+                    total_insertadas += result.rowcount if result.rowcount is not None else len(batch)
+                continue
+            except (IntegrityError, DataError, OperationalError, DBAPIError) as e_batch:
+                # batch falló -> fallback fila por fila
+                _append_db_error_txt(error_txt, e_batch, {
+                    "id_expediente": f"[BATCH {i}-{i+len(batch)-1}]"
+                })
+
+            # 2) fallback: fila por fila con SAVEPOINT para no romper el flujo
+            for row in batch:
+                try:
+                    with conn.begin_nested():  # SAVEPOINT
+                        conn.execute(SQL_INSERT_EXPEDIENTES, row)
+                    total_insertadas += 1
+                except (IntegrityError, DataError, OperationalError, DBAPIError) as e_row:
+                    _append_db_error_txt(error_txt, e_row, row)
+                    # seguimos con la siguiente fila
+                    continue
+
+        # si tu driver requiere commit final explícito para nested (a veces no),
+        # puedes descomentar esto:
+        # conn.commit()
+
+    return total_insertadas
 
 def insertar_expediente(data: dict) -> int:
     sql = text("""
@@ -127,7 +197,7 @@ def normalizar_registro(reg: dict) -> dict:
     # crea un dict con todas las llaves esperadas
     return {k: reg.get(k) for k in CAMPOS_EXPEDIENTE}
 
-def insertar_expedientes_bulk(registros: list[dict], batch_size: int = 1000) -> int:
+def insertar_expedientes_bulk_(registros: list[dict], batch_size: int = 1000) -> int:
     registros_norm = [normalizar_registro(r) for r in registros]
     total_insertadas = 0
 

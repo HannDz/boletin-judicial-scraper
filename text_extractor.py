@@ -15,6 +15,14 @@ RE_EXP = re.compile(
     re.IGNORECASE
 )
 
+RE_NUM_EXP = re.compile(
+    r"\b(?:N[uú]m\.?|Num\.?)\s*Exp\.?\s*"
+    r"(?P<num>\d{1,6})\s*[/\-]\s*(?P<anio>\d{4})"
+    r"(?:\s*(?:Bis\.?|BIS)\s*(?P<bis>\d{1,2}))?"
+    r"(?:\s*[/\-]\s*(?P<seq>\d{1,3}))?",
+    re.IGNORECASE
+)
+
 def _fix_year_ocr(year: str) -> str:
     y = (year or "").strip()
     # OCR típico: 2021 -> 201, 2022 -> 202, 2023 -> 203
@@ -143,36 +151,18 @@ RE_ARR = re.compile(r"\bArrend(?:\.|amiento)\b", re.IGNORECASE)
 
 RE_TIPO = re.compile(
     r"(?P<tipo>"
-    r"(?:\w{2,15}\s*[-–—]\s*)?"                       # prefijo opcional: Cnpeyf-
-    r"(?:Controv\.?\s*(?:de\s+)?Arrend(?:\.|amiento)" # Controv Arrend
-    r"|Especial\s*de\s*Arrendamiento\s*Oral"          # Especial Arrend Oral
-    r"|Ejec\.?\s*Merc\.?)"                            # Ejec Merc
-    r")(?=\W|$)",
-    re.IGNORECASE
-)
-
-RE_TIPO_CASO = re.compile(
-    r"(Controv\.?\s*(?:de\s+)?Arrend(?:\.|amiento)"
-    r"|Ejec\.?\s*Merc\.?)",
-    re.IGNORECASE
-)
-
-
-# Solo aceptamos tipos completos (si no está completo -> se omite)
-RE_TIPO_ARR_ANY = re.compile(
-    r"(?P<tipo>\b(?:\w{2,20}\s*[-–—]\s*)?(?:Especial|Controv)\.?\s*(?:de\s+)?Arrend(?:\.|amiento)(?:\s+Oral)?\b)",
-    re.IGNORECASE
-)
-
-# ITEM dentro del caso: (tipo arrendamiento) + T. + (pref opcional) + expediente roto (espacios/saltos)
-RE_ARR_ITEM_OCR = re.compile(
-    r"(?P<tipo>(?:Especial|Controv)\.?\s*(?:de\s+)?Arrendamiento(?:\s+Oral)?)"
-    r"\s*"
-    r"T\.?\s*"
-    r"(?P<pref>[A-Za-z]{1,3})?\s*"
-    r"(?P<num>\d(?:\s*\d){0,5})\s*(?:[/\-]|\s)\s*"
-    r"(?P<anio>\d(?:\s*\d){3})\s*(?:[/\-]|\s)\s*"
-    r"(?P<seq>\d(?:\s*\d){0,2})",
+    r"(?:\w{2,15}\s*[-–—]\s*)?"  # prefijo opcional tipo Cnpcyf-
+    r"(?:"
+        # --- Arrendamiento (variantes) ---
+        r"Controv\.?\s*(?:de\s+)?Arrend(?:\.|amiento)?"
+        r"|Controv\.?\s*Arrend\.?"                 # "Controv. Arrend."
+        r"|Especial\s*de\s*Arrendamiento\s*Oral"
+        r"|Arrend(?:\.|amiento)\b"                 # fallback si viene solo "Arrend."
+        # --- Ejecución Mercantil (variantes OCR) ---
+        r"|Ejec\.?\s*(?:Merc|Mere|Mer[cce])\.?"    # Merc / Mere / Merce (OCR)
+        r"|Ejecuci[oó]n\s+Mercantil"               # por si viene completo
+    r")"
+    r")(?=\s|[.,;:)]|$)",  # lookahead más práctico que \W (OCR mete cosas raras)
     re.IGNORECASE
 )
 
@@ -336,6 +326,19 @@ def parse_arrendamiento_block(
             if seq:
                 return f"T. {num}-{anio}-{seq.strip().zfill(3)}"
             return f"T. {num}-{anio}"
+    
+    def _fmt_numexp(m: re.Match) -> str:
+            num = (m.group("num") or "").strip()
+            anio = (m.group("anio") or "").strip()
+            bis = (m.group("bis") or "").strip()
+            seq = (m.group("seq") or "").strip()
+
+            base = f"NUM. EXP. {num}/{anio}"
+            if bis:
+                base += f" BIS {bis}"
+            if seq:
+                base += f"/{seq.zfill(3)}"
+            return base
 
     for i, vs_m in enumerate(vs_all):
         case_start = _case_start_before_vs_ocr(text, vs_m.start())
@@ -394,13 +397,63 @@ def parse_arrendamiento_block(
 
         # ✅ en vez de RE_ARR_ITEM_OCR, extrae expedientes robusto (2023 incluido)
         segmento = resto[m_tipo0.start():]
-        exp_matches = list(RE_EXP.finditer(segmento))
-        if not exp_matches:
-            # si no hay expediente, omitimos (estructura incompleta)
-            continue
 
-        for em in exp_matches:
+        exp_matches_t = list(RE_EXP.finditer(segmento))
+        exp_matches_n = list(RE_NUM_EXP.finditer(segmento))
+
+        if not exp_matches_t and not exp_matches_n:
+            continue
+        
+        expedientes_ids = []
+
+        for m in exp_matches_t:
+            expedientes_ids.append(_fmt_exp_from_match(m))
+
+        for m in exp_matches_n:
+            expedientes_ids.append(_fmt_numexp(m))
+
+        for em in exp_matches_t:
             id_expediente = _fmt_exp_from_match(em)
+            tail = segmento[em.end(): em.end() + 220]
+            estatus, num_estatus = None, None
+            if RE_SENT.search(tail):
+                estatus = "Sent"
+            else:
+                m_ac = RE_ACDO.search(tail)
+                if m_ac:
+                    num_estatus = int(m_ac.group(1))
+                    estatus = "Acdo"
+
+            for demandado in demandados:
+                conteo_demandados = f"demandado: {idx_map[demandado]}"
+                reg = {
+                    "id_expediente": id_expediente,
+                    "actor_demandante": actor or "Desconocido",
+                    "demandado": demandado or "Desconocido",
+                    "tipo_juicio": tipo_juicio or "Desconocido",
+                    "estatus": estatus or "Desconocido",
+                    "num_estatus": num_estatus or "Desconocido",
+                    "fecha_publicacion": fecha_pub,
+                    "numero_boletin": num_boletin or 0,
+                    "numero_pagina": num_pag or 0,
+
+                    # ✅ mantén ambos para no perderlo
+                    "sala": sala_civil or "Desconocido",
+                    "juzgado": sala_civil or "Desconocido",
+                    "conteo_demandados": conteo_demandados or "Desconocido",
+                }
+
+                key = (
+                    reg["id_expediente"], reg["actor_demandante"], reg["demandado"],
+                    reg["tipo_juicio"], reg["estatus"], reg["num_estatus"],
+                    reg["sala"], reg["fecha_publicacion"], reg["numero_boletin"], reg["numero_pagina"], reg["conteo_demandados"]
+                )
+
+                if key not in seen:
+                    seen.add(key)
+                    resultados.append(reg)
+        for em in exp_matches_n:
+            id_expediente = _fmt_numexp(em) #id_expediente = _fmt_exp_from_match(em)
 
             tail = segmento[em.end(): em.end() + 220]
             estatus, num_estatus = None, None
@@ -416,19 +469,19 @@ def parse_arrendamiento_block(
                 conteo_demandados = f"demandado: {idx_map[demandado]}"
                 reg = {
                     "id_expediente": id_expediente,
-                    "actor_demandante": actor,
-                    "demandado": demandado,
-                    "tipo_juicio": tipo_juicio,
-                    "estatus": estatus,
-                    "num_estatus": num_estatus,
+                    "actor_demandante": actor or "Desconocido",
+                    "demandado": demandado or "Desconocido",
+                    "tipo_juicio": tipo_juicio or "Desconocido",
+                    "estatus": estatus or "Desconocido",
+                    "num_estatus": num_estatus or "Desconocido",
                     "fecha_publicacion": fecha_pub,
-                    "numero_boletin": num_boletin,
-                    "numero_pagina": num_pag,
+                    "numero_boletin": num_boletin or 0,
+                    "numero_pagina": num_pag or 0,
 
                     # ✅ mantén ambos para no perderlo
-                    "sala": sala_civil,
-                    "juzgado": sala_civil,
-                    "conteo_demandados": conteo_demandados,
+                    "sala": sala_civil or "Desconocido",
+                    "juzgado": sala_civil or "Desconocido",
+                    "conteo_demandados": conteo_demandados or "Desconocido",
                 }
 
                 key = (
@@ -443,6 +496,232 @@ def parse_arrendamiento_block(
 
     return resultados
 
+
+def _compact_digits(s: Optional[str], keep_slash: bool = False) -> str:
+    """
+    Compacta dígitos que vienen separados por OCR/PDF (espacios, saltos, etc).
+
+    keep_slash=False  -> deja SOLO dígitos
+    keep_slash=True   -> deja dígitos y '/' (útil para "1184/2007")
+    """
+    if not s:
+        return ""
+
+    s = str(s)
+
+    if keep_slash:
+        # deja dígitos y '/', elimina todo lo demás
+        s = re.sub(r"[^0-9/]+", "", s)
+        # compacta múltiples / seguidos (por OCR)
+        s = re.sub(r"/{2,}", "/", s)
+        return s.strip("/")
+
+    # solo dígitos
+    return re.sub(r"\D+", "", s)
+
+# def parse_arrendamiento_block(
+#     block: str,
+#     fecha_pub: str,
+#     num_boletin: int,
+#     num_pag: int,
+#     state
+# ) -> List[Dict]:
+
+#     text = _normalize_keep_newlines_ocr(block)
+#     text = _unir_expedientes_partidos(text)
+
+#     # ✅ actualiza estado con la sala si aparece en esta página
+#     actualizar_ultima_sala(text, state)
+
+#     # ✅ Si no hay tipo objetivo (Arrend o Ejec. Merc.), salimos
+#     if not RE_TIPO.search(text):
+#         return []
+
+#     resultados: List[Dict] = []
+#     seen = set()
+
+#     # index de salas en la página (si hay)
+#     sala_starts, sala_values = _build_sala_index(text)
+
+#     vs_all = list(RE_VS.finditer(text))
+#     if not vs_all:
+#         return []
+
+#     def _fmt_exp_from_match(m: re.Match) -> str:
+#         """
+#         Formatea expedientes tipo T. con / o -, tolerando OCR.
+#         Espera grupos como:
+#           pref, num, anio_slash, seq_slash  o  anio_h, seq_h
+#         """
+#         pref = (m.group("pref") or "").strip()
+#         num  = (m.group("num") or "").strip()
+
+#         if m.groupdict().get("anio_slash"):
+#             anio = (m.group("anio_slash") or "").strip()
+#             seq  = (m.group("seq_slash") or "").strip().zfill(3)
+#             return (f"T. {pref} {num}/{anio}/{seq}".strip() if pref else f"T. {num}/{anio}/{seq}")
+#         else:
+#             anio = _fix_year_ocr(m.group("anio_h"))
+#             seq  = m.groupdict().get("seq_h")
+#             if seq:
+#                 return f"T. {num}-{anio}-{seq.strip().zfill(3)}"
+#             return f"T. {num}-{anio}"
+
+#     def _fmt_numexp(m: re.Match) -> str:
+#         """
+#         Formatea expedientes tipo: Num. Exp. 1439/1996
+#         """
+#         num  = (m.group("numexp") or "").strip()
+#         anio = (m.group("anioexp") or "").strip()
+
+#         # a veces OCR mete espacios o caracteres raros
+#         num = _compact_digits(num)
+#         anio = _compact_digits(anio)
+
+#         if not num or not anio:
+#             return ""
+#         return f"Num. Exp. {num}/{anio}"
+
+#     for i, vs_m in enumerate(vs_all):
+#         case_start = _case_start_before_vs_ocr(text, vs_m.start())
+#         case_start = _safe_case_start(text, vs_m.start(), case_start)
+
+#         case_end = vs_all[i + 1].start() if (i + 1) < len(vs_all) else len(text)
+#         caso = text[case_start:case_end].strip()
+
+#         # ✅ si no hay tipo en el caso, no lo proceses
+#         if not caso or not RE_TIPO.search(caso):
+#             continue
+
+#         vs_rel_start = vs_m.start() - case_start
+#         vs_rel_end = vs_m.end() - case_start
+#         if vs_rel_start < 0 or vs_rel_end > len(caso):
+#             continue
+
+#         actor_raw = caso[:vs_rel_start]
+#         resto = caso[vs_rel_end:]
+
+#         # ✅ Tipo (Arrend / Ejec. Merc)
+#         m_tipo0 = RE_TIPO.search(resto)
+#         if not m_tipo0:
+#             continue
+
+#         # ✅ Si antes del tipo aparece otro "vs", es mezcla => omite
+#         if RE_VS.search(resto[:m_tipo0.start()]):
+#             continue
+
+#         actor = _clean_name_chunk(_strip_headers(actor_raw)) or None
+
+#         # Demandado(s)
+#         demandado_raw = _clean_name_chunk(resto[:m_tipo0.start()]) or ""
+#         demandados = split_demandados(demandado_raw)
+
+#         if not demandados:
+#             continue
+
+#         # Mapa estable: demandado -> índice incremental (1..N) por caso (NO por expediente)
+#         idx_map = {d: idx + 1 for idx, d in enumerate(demandados)}
+
+#         # ✅ sala por posición (si está en la página), si no, usa la última guardada
+#         tipo_abs_pos = case_start + vs_rel_end + m_tipo0.start()
+#         sala_civil = _sala_para_pos(sala_starts, sala_values, tipo_abs_pos)
+
+#         # Si la sala encontrada es genérica, usa la del estado si es más específica
+#         if (sala_civil and RE_SOLO_SALA_CIVIL.match(sala_civil)
+#                 and state.last_sala_civil
+#                 and not RE_SOLO_SALA_CIVIL.match(state.last_sala_civil)):
+#             sala_civil = state.last_sala_civil
+
+#         if not sala_civil:
+#             sala_civil = state.last_sala_civil
+
+#         tipo_juicio = _clean_chunk(m_tipo0.group("tipo")) or None
+
+#         # ✅ Segmento desde el tipo hacia delante (ahí viven los expedientes y estatus)
+#         segmento = resto[m_tipo0.start():]
+
+#         # =========================
+#         # ✅ EXPEDIENTES: T. y Num. Exp.
+#         # =========================
+#         exp_matches_t = list(RE_EXP.finditer(segmento))
+#         exp_matches_n = list(RE_NUM_EXP.finditer(segmento))
+
+#         # Si no hay ninguno, omitimos (estructura incompleta)
+#         if not exp_matches_t and not exp_matches_n:
+#             continue
+
+#         # (Opcional) Si existe T., normalmente prefieres T. y no Num Exp.
+#         # Deja esto encendido para evitar duplicados "Num Exp" cuando ya hay "T."
+#         if exp_matches_t:
+#             exp_matches_n = []
+
+#         # lista de (id_expediente, end_pos_en_segmento)
+#         exp_items = []
+
+#         for m in exp_matches_t:
+#             exp_id = _fmt_exp_from_match(m)
+#             if exp_id:
+#                 exp_items.append((exp_id, m.end()))
+
+#         for m in exp_matches_n:
+#             exp_id = _fmt_numexp(m)
+#             if exp_id:
+#                 exp_items.append((exp_id, m.end()))
+
+#         if not exp_items:
+#             continue
+
+#         # =========================
+#         # ✅ Por cada expediente detectado, calcula estatus desde su "tail"
+#         # =========================
+#         for id_expediente, endpos in exp_items:
+#             tail = segmento[endpos:endpos + 260]
+
+#             estatus, num_estatus = None, None
+#             if RE_SENT.search(tail):
+#                 estatus = "Sent"
+#             else:
+#                 m_ac = RE_ACDO.search(tail)
+#                 if m_ac:
+#                     num_estatus = int(m_ac.group(1))
+#                     estatus = "Acdo"
+
+#             # =========================
+#             # ✅ Genera registros por cada demandado (con conteo incremental)
+#             # =========================
+#             for demandado in demandados:
+#                 conteo_demandados = f"demandado: {idx_map[demandado]}"
+
+#                 reg = {
+#                     "id_expediente": id_expediente,
+#                     "actor_demandante": actor or None,
+#                     "demandado": demandado or None,
+#                     "tipo_juicio": tipo_juicio or None,
+#                     "estatus": estatus,
+#                     "num_estatus": num_estatus,
+#                     "fecha_publicacion": fecha_pub,
+#                     "numero_boletin": num_boletin,
+#                     "numero_pagina": num_pag,
+
+#                     # ✅ conserva ambos por compatibilidad
+#                     "sala": sala_civil,
+#                     "juzgado": sala_civil,
+#                     "conteo_demandados": conteo_demandados,
+#                 }
+
+#                 key = (
+#                     reg["id_expediente"], reg["actor_demandante"], reg["demandado"],
+#                     reg["tipo_juicio"], reg["estatus"], reg["num_estatus"],
+#                     reg.get("sala") or reg.get("juzgado"),
+#                     reg["fecha_publicacion"], reg["numero_boletin"], reg["numero_pagina"],
+#                     reg["conteo_demandados"]
+#                 )
+
+#                 if key not in seen:
+#                     seen.add(key)
+#                     resultados.append(reg)
+
+#     return resultados
 
 RE_VS_LINE = re.compile(r"^\s*[A-ZÁÉÍÓÚÑ(].{3,300}\bvs\.?\b", re.IGNORECASE)
 RE_CASE_LINE = re.compile(r"^\s*[A-ZÁÉÍÓÚÑ(].{3,300}\bvs\.?\b", re.IGNORECASE)
