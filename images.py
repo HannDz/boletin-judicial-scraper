@@ -57,12 +57,76 @@ def procesar_pagina(session, url_img, idx):
 
     return texto
 
-def ocr_imagen(img):
-    return pytesseract.image_to_string(
-        img,
-        lang="spa+eng",
-        config="--psm 4 --oem 3"
-    )
+import json
+import traceback
+
+def log_error_imagen(path_txt: str, url: str, path_img: str, err: str):
+    os.makedirs(os.path.dirname(path_txt) or ".", exist_ok=True)
+    with open(path_txt, "a", encoding="utf-8") as f:
+        f.write(f"URL: {url}\nPATH: {path_img}\nERROR: {err}\n{'-'*80}\n")
+
+def log_error_imagen_jsonl(path_jsonl: str, fase: str, url: str, path_img: str, err: str, page: int | None = None):
+    os.makedirs(os.path.dirname(path_jsonl) or ".", exist_ok=True)
+    payload = {
+        "ts": datetime.utcnow().isoformat(timespec="seconds"),
+        "fase": fase,
+        "url": url,
+        "path": path_img,
+        "page": page,
+        "error": err,
+    }
+    with open(path_jsonl, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+def _to_rgb(img):
+    # Tesseract suele ir mejor con RGB; también evita problemas si llega BGRA
+    if img is None:
+        return None
+    if len(img.shape) == 2:
+        return cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    if img.shape[2] == 4:
+        return cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+def ocr_imagen(img, url="(sin url)", path_img="(sin path)", page=None,
+              log_txt="errores_imagenes.txt", log_jsonl="fallos_ocr.jsonl"):
+    """
+    OCR robusto:
+    - intenta config base
+    - si Tesseract truena (-11, etc.), reintenta con psm alternos
+    - si todo falla, loguea y regresa "" para no romper el flujo
+    """
+    if img is None:
+        log_error_imagen(log_txt, url, path_img, "img is None en ocr_imagen")
+        log_error_imagen_jsonl(log_jsonl, "ocr", url, path_img, "img is None en ocr_imagen", page=page)
+        return ""
+
+    # Convierte a RGB (reduce crashes raros)
+    rgb = _to_rgb(img)
+
+    configs = [
+        "--psm 4 --oem 3",
+        "--psm 6 --oem 3",
+        "--psm 11 --oem 3",
+    ]
+
+    last_exc = None
+    for cfg in configs:
+        try:
+            return pytesseract.image_to_string(
+                rgb,
+                lang="spa+eng",
+                config=cfg
+            )
+        except Exception as e:
+            last_exc = e
+            # sigue al siguiente config
+
+    # si todos fallan: log
+    err = f"OCR falló. last={repr(last_exc)}\n{traceback.format_exc()}"
+    log_error_imagen(log_txt, url, path_img, err)
+    log_error_imagen_jsonl(log_jsonl, "ocr", url, path_img, repr(last_exc), page=page)
+    return ""
 
 def preprocesar_base(path):
     img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
@@ -104,36 +168,32 @@ def preprocesar_imagen(path, debug=settings.is_debbug):
         cv2.THRESH_BINARY + cv2.THRESH_OTSU
     )[1]
 
-    # if debug:
-    #     cv2.imwrite(
-    #         f"tmp/debug_{os.path.basename(path)}",
-    #         img
-    #     )
-
     return img
 
-def ocr_por_columnas(img):
+def ocr_por_columnas(img, url="(sin url)", path_img="(sin path)", page=None):
     h, w = img.shape[:2]
     mitad = w // 2
 
     col_izq = img[:, :mitad]
     col_der = img[:, mitad:]
 
-    texto_izq = ocr_imagen(col_izq)
-    texto_der = ocr_imagen(col_der)
+    texto_izq = ocr_imagen(col_izq, url=url, path_img=path_img, page=page)
+    texto_der = ocr_imagen(col_der, url=url, path_img=path_img, page=page)
 
-    return texto_izq + "\n" + texto_der
+    return (texto_izq or "") + "\n" + (texto_der or "")
 
 def procesar_pagina_columna(session, url_img, idx):
     path = f"tmp/pagina_{idx}.jpg"
-    #path = f"tmp/boletin_prueba.jpg"
-    descargar_imagen(session, url_img, path)
+
+    ok = descargar_imagen(session, url_img, path)
+    if not ok:
+        return ""
+
     img = preprocesar_imagen_columna(path, settings.is_debbug)
     if img is None:
-    # ya quedó logueado, continúas flujo
         return ""
-    #img = cv2.imread()
-    texto = ocr_por_columnas(img)
+
+    texto = ocr_por_columnas(img, url=url_img, path_img=path, page=idx)
 
     try:
         os.remove(path)
@@ -168,12 +228,6 @@ def preprocesar_imagen_columna(path, debug=True, log_path="errores_imagenes.txt"
         mask = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
 
         resultado = cv2.inpaint(img, mask, 7, cv2.INPAINT_TELEA)
-
-        if settings.is_debbug:
-            os.makedirs("tmp", exist_ok=True)
-            # guarda original y procesada para comparar
-            cv2.imwrite(f"tmp/orig_{os.path.basename(path)}", img)
-            cv2.imwrite(f"tmp/proc_{os.path.basename(path)}", resultado)
 
     except Exception as e:
         # si falla el preproceso, NO rompas flujo: solo log y sigues con original
