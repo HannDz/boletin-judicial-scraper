@@ -58,8 +58,32 @@ def obtener_visor_desde_thumb(html):
     )
     return match.group(1) if match else None
 
-def descargar_pdf(url_pdf: str, out_path: str = "boletin.pdf") -> str:
-    r = requests.get(url_pdf, timeout=60)
-    r.raise_for_status()
-    Path(out_path).write_bytes(r.content)
-    return out_path
+# def descargar_pdf(url_pdf: str, out_path: str = "boletin.pdf") -> str:
+#     r = requests.get(url_pdf, timeout=60)
+#     r.raise_for_status()
+#     Path(out_path).write_bytes(r.content)
+#     return out_path
+
+def descargar_pdf(url_pdf: str, out_path: str = "boletin.pdf") -> str | None:
+    try:
+        r = requests.get(url_pdf, timeout=60)
+
+        if r.status_code == 404:
+            print(f"[WARN] PDF no existe (404): {url_pdf}")
+            return None
+
+        if not r.ok:
+            print(f"[WARN] HTTP {r.status_code} al descargar PDF: {url_pdf}")
+            return None
+
+        ct = (r.headers.get("Content-Type") or "").lower()
+        if "pdf" not in ct and not r.content.startswith(b"%PDF"):
+            print(f"[WARN] Respuesta no es PDF. Content-Type={ct}. URL={url_pdf}")
+            return None
+
+        Path(out_path).write_bytes(r.content)
+        return out_path
+
+    except requests.RequestException as e:
+        print(f"[WARN] Error de red al descargar PDF {url_pdf}: {e}")
+        return None

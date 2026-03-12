@@ -177,19 +177,28 @@ def construir_url_temporal(src_url, id_raw, pagina, tam=2):
         f"{token}/{id_num}_{pagina}-{tam}.jpg"
     )
 
-def obtener_inicio_columnas(texto):
-    texto = texto.upper()
+_RE_SALAS_CHUNK = re.compile(r"\bSALAS\b(.{0,20})", re.IGNORECASE)
 
-    match = re.search(
-        r"SALAS\s+(\d+)",
-        texto
-    )
-
-    if not match:
+def obtener_inicio_columnas(texto: str):
+    if not texto:
         return None
 
-    pagina_salas = int(match.group(1))
-    return max(pagina_salas - 2, 1)
+    t = texto.upper()
+    m = _RE_SALAS_CHUNK.search(t)
+    if not m:
+        return None
+
+    chunk = m.group(1)
+
+    # OCR: T/I/L/|/¡ suelen ser "1"
+    chunk = re.sub(r"[TIL\|¡]", "1", chunk)
+
+    # ✅ solo el primer número que aparezca (1 a 3 dígitos)
+    mnum = re.search(r"(\d{1,3})", chunk)
+    if not mnum:
+        return None
+
+    return int(mnum.group(1))
 
 MESES_CONVERT = {
     "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,

@@ -10,6 +10,7 @@ from configuration import settings
 from repository import *
 from text_extractor import *
 from text_pdf_extractor import *
+
 os.makedirs("tmp", exist_ok=True)
 
 session = crear_sesion()
@@ -28,6 +29,7 @@ state = ParserState()
 for fecha,l in externos:
     if not existe_procesamiento(fecha, l):
         expedientes=[]
+        textos = []
         direccion = extraer_url_redireccion(html = obtener_html(l))
         contador = 0
         if direccion != None:
@@ -47,45 +49,59 @@ for fecha,l in externos:
                     texto = procesar_pagina_columna(session, html_thumb, contador)
                     expedientes.extend(parse_arrendamiento_block(texto, fecha_pub, num_boletin, contador + 2, state))
 
-                if debug:
-                    textos.append(texto)
-                    if contador == 50:
-                        break
+                # if debug:
+                textos.append(texto)
+                #     if contador == 30:
+                #         break
                 contador+=1
         else:
             direccion = extraer_pdf_source(html = obtener_html(l))
             path_salida = descargar_pdf(direccion, f"boletin_{fecha.isoformat()}.pdf")
-            texto = extraer_texto_pypdf_con_paginas(path_salida)
-            reader = PdfReader(path_salida)
-            print("Total páginas PDF:", len(reader.pages))
+            if path_salida is None:
+        # NO TRUENA: sigue con el siguiente boletín
+                continue
 
-            print("Total headers en texto:", texto.count("PAGINA "))
-            print("Longitud del texto (chars):", len(texto))
+            try:
+                texto = extraer_texto_pypdf_con_paginas(path_salida)
 
-            vacias = 0
-            for chunk in texto.split("PAGINA ")[1:]:
-                # chunk empieza como "i/total\n====\n<contenido>"
-                contenido = chunk.split("\n", 3)[-1].strip()
-                if not contenido:
-                    vacias += 1
+                reader = PdfReader(path_salida)
+                print("Total páginas PDF:", len(reader.pages))
 
-            print("Páginas vacías (sin texto extraído):", vacias)
-            eliminar_pdf(path_salida) 
-            contador = extraer_total_paginas(texto)
-            print(texto.split("RESUMEN")[-1]) 
-            expedientes.extend(parse_arrendamiento_salas_block_v2(texto, fecha.isoformat(), 38, 2))
-        if debug:
-            cont = 1
-            fecha_string = fecha.isoformat()
-            textos.append(texto)
-            for cont, texto in enumerate(textos, start=1):
-                ruta_salida = f"revision_boletin{fecha_string}.txt"
-                guardar_texto_incremental(
-                    ruta_salida,
-                    texto,   
-                    cont     
-                )
-                cont +=1
+                print("Total headers en texto:", texto.count("PAGINA "))
+                print("Longitud del texto (chars):", len(texto))
+
+                vacias = 0
+                for chunk in texto.split("PAGINA ")[1:]:
+                    # chunk empieza como "i/total\n====\n<contenido>"
+                    contenido = chunk.split("\n", 3)[-1].strip()
+                    if not contenido:
+                        vacias += 1
+
+                print("Páginas vacías (sin texto extraído):", vacias)
+                eliminar_pdf(path_salida) 
+                contador = extraer_total_paginas(texto)
+                print(texto.split("RESUMEN")[-1]) 
+                expedientes.extend(parse_arrendamiento_salas_block_v2(texto, fecha.isoformat(), 38, 2))
+            except Exception as e:
+                print(f"[WARN] Error procesando PDF {path_salida} (fecha={fecha}): {e}")
+                # intenta limpiar pdf si existe
+                try:
+                    eliminar_pdf(path_salida)
+                except Exception:
+                    pass
+                continue
+        #if debug:
+        cont = 1
+        fecha_string = fecha.isoformat()
+        textos.append(texto)
+        for cont, texto in enumerate(textos, start=1):
+            ruta_salida = f"revision_boletin{fecha_string}.txt"
+            guardar_texto_incremental(
+                ruta_salida,
+                texto,   
+                cont     
+            )
+            cont +=1
         
         if expedientes != None or len(expedientes) > 0:
             cantidad_insercion = insertar_expedientes_bulk(expedientes)

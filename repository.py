@@ -41,6 +41,8 @@ def insertar_expedientes_bulk(
     # porque una excepción deja la transacción en estado inválido.
     with engine.connect() as conn:
         for i in range(0, len(registros_norm), batch_size):
+            if conn.in_transaction():
+                conn.rollback()
             batch = registros_norm[i:i + batch_size]
 
             # 1) intento rápido por batch en su propia transacción
