@@ -59,8 +59,25 @@ RE_EXP_FLEX = re.compile(
     r"\b",
     re.IGNORECASE
 )
+_DASH = r"[-–—]"
 
+RE_EXP = re.compile(
+    rf"\bT\.?\s*(?:(?P<pref>[A-Za-z]{{1,4}})\.?\s*)?"
+    rf"(?P<num>\d{{1,5}})\s*"
+    rf"(?:"
+      rf"(?:/|\s+)\s*(?P<anio_slash>\d{{4}})\s*(?:/|\s+)\s*(?P<seq_slash>\d{{1,3}})"
+      rf"|{_DASH}\s*(?P<anio_h>\d{{3,4}})(?:\s*{_DASH}\s*(?P<seq_h>\d{{1,3}}))?"
+    rf")",
+    re.IGNORECASE
+)
 
+RE_NUM_EXP = re.compile(
+    r"\b(?:N[uú]m\.?|Num\.?)\s*Exp\.?\s*"
+    r"(?P<num>\d{1,6})\s*[/\-]\s*(?P<anio>\d{4})"
+    r"(?:\s*(?:Bis\.?|BIS)\s*(?P<bis>\d{1,2}))?"
+    r"(?:\s*[/\-]\s*(?P<seq>\d{1,3}))?",
+    re.IGNORECASE
+)
 
 RE_SEPARADOR = re.compile(r"=+\s*", re.IGNORECASE)
 RE_PAGINA_HDR = re.compile(r"\bPAGINA\s+\d+\s*/\s*\d+\b", re.IGNORECASE)
@@ -85,6 +102,41 @@ RE_TIPO_OBJETIVO = re.compile(
     r")",
     re.IGNORECASE
 )
+
+def _fix_year_ocr(year: str) -> str:
+    y = (year or "").strip()
+    # OCR típico: 2021 -> 201, 2022 -> 202, 2023 -> 203
+    if len(y) == 3 and y.startswith("20") and y[2].isdigit():
+        return "202" + y[2]
+    return y
+
+def _fmt_exp_from_match(m: re.Match) -> str:
+    pref = (m.group("pref") or "").strip()
+    num  = (m.group("num") or "").strip()
+
+    if m.groupdict().get("anio_slash"):
+        anio = (m.group("anio_slash") or "").strip()
+        seq  = (m.group("seq_slash") or "").strip().zfill(3)
+        return (f"T. {pref} {num}/{anio}/{seq}".strip() if pref else f"T. {num}/{anio}/{seq}")
+    else:
+        anio = _fix_year_ocr(m.group("anio_h"))
+        seq  = m.groupdict().get("seq_h")
+        if seq:
+            return f"T. {num}-{anio}-{seq.strip().zfill(3)}"
+        return f"T. {num}-{anio}"
+
+def _fmt_numexp(m: re.Match) -> str:
+    num  = (m.group("num") or "").strip()
+    anio = (m.group("anio") or "").strip()
+    bis  = (m.group("bis") or "").strip()
+    seq  = (m.group("seq") or "").strip()
+
+    base = f"NUM. EXP. {num}/{anio}"
+    if bis:
+        base += f" BIS {bis}"
+    if seq:
+        base += f"/{seq.zfill(3)}"
+    return base
 
 def limpiar_ruido_boletin(texto: str) -> str:
     """
@@ -208,8 +260,25 @@ def _clean_chunk(s: str) -> str:
     return s.strip(" .;:-")
 
 def _extract_expedientes_sala(s: str) -> List[str]:
+    if not s:
+        return []
     out: List[str] = []
     seen = set()
+
+    for m in RE_EXP.finditer(s):
+        exp = _fmt_exp_from_match(m)
+        k = exp.lower()
+        if k not in seen:
+            seen.add(k)
+            out.append(exp)
+
+    # 2) RE_NUM_EXP (Num. Exp.)
+    for m in RE_NUM_EXP.finditer(s):
+        exp = _fmt_numexp(m)
+        k = exp.lower()
+        if k not in seen:
+            seen.add(k)
+            out.append(exp)
 
     for m in RE_EXP_FLEX.finditer(s or ""):
         pref = (m.group("pref") or "").strip()
@@ -703,12 +772,31 @@ def parse_arrendamiento_salas_block_v2(
         sala_civil = _sala_civil_para_pos(text, tipo_pos)
 
         # Segmento “línea” del tipo hasta el primer estatus (o ventana corta)
+
+        # st = RE_STATUS.search(text, tipo_pos, case_end)
+        # line_end = st.end() if st else min(tipo_pos + 900, case_end)
+        # seg = text[tipo_pos:line_end]
+
+        # # expedientes SOLO de esta línea
+        # expedientes = _extract_expedientes_sala(seg)
+        # if not expedientes:
+        #     continue
         st = RE_STATUS.search(text, tipo_pos, case_end)
-        line_end = st.end() if st else min(tipo_pos + 900, case_end)
+
+        if st:
+            # incluye un “buffer” después del estatus para alcanzar "Núm. Exp."
+            line_end = min(st.end() + 600, case_end)
+        else:
+            line_end = min(tipo_pos + 1400, case_end)
+
         seg = text[tipo_pos:line_end]
 
-        # expedientes SOLO de esta línea
         expedientes = _extract_expedientes_sala(seg)
+        if not expedientes:
+            # fallback: intenta buscar Num Exp en una ventana corta adicional (por si quedó aún después)
+            seg_fallback = text[tipo_pos:min(tipo_pos + 2500, case_end)]
+            expedientes = _extract_expedientes_sala(seg_fallback)
+
         if not expedientes:
             continue
 

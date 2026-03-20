@@ -922,6 +922,42 @@ def _clean_name_chunk(s: str) -> str:
     s = s.strip(" ,;.")
     return s
 
+RE_DEMANDADO_TAIL_CUT = re.compile(
+    r"""(?ix)
+    \b(
+        Controv(?:ersias)?              |
+        Oral                           |
+        Mercantil                      |
+        Familiar                       |
+        Ejecutivo                      |
+        Amparo                         |
+        Cuaderno                       |
+        Exhibe                         |
+        Garant[ií]a                    |
+        Susp\.?                        |
+        Ejecc?\.?                      |
+        Acto\s+Reclamado               |
+        Acdo(?:s)?\.?                  |
+        Sent(?:encia)?\.?              |
+        N[uú]m\.?\s*Exp\.?             |
+        Num\.?\s*Exp\.?                |
+        T\.?\s*                        |
+        RESUMEN                        |
+        \(                             |
+        \b\d{1,3}\s*(?:Acdos?|Acdo)\b   # “1 Acdo”, “3 Acdos”
+    )\b
+    """
+)
+
+def _cut_tail_non_name(s: str) -> str:
+    """Corta cola típica que NO es parte del nombre del demandado."""
+    if not s:
+        return s
+    m = RE_DEMANDADO_TAIL_CUT.search(s)
+    if m:
+        s = s[:m.start()].strip()
+    return s.strip(" .;,:-")
+
 def split_demandados(demandado_raw: str) -> List[str]:
     """
     Devuelve lista de demandados:
@@ -964,6 +1000,7 @@ def split_demandados(demandado_raw: str) -> List[str]:
                 c = _cut_alias_phrases(c)
                 c = _join_dropped_initials(c)
                 c = _clean_name_chunk(c)
+                c = _cut_tail_non_name(c) 
 
                 if not c:
                     continue
@@ -975,6 +1012,7 @@ def split_demandados(demandado_raw: str) -> List[str]:
                     q = _cut_alias_phrases(q)
                     q = _join_dropped_initials(q)
                     q = _clean_name_chunk(q)
+                    q = _cut_tail_non_name(q) 
 
                     if not q:
                         continue
