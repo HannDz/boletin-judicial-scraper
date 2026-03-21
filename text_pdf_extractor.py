@@ -59,6 +59,26 @@ RE_EXP_FLEX = re.compile(
     r"\b",
     re.IGNORECASE
 )
+RE_CORP_SUFFIX_ONLY = re.compile(
+    r"""(?ix)^\s*
+    (S\.?\s*de\s*R\.?\s*L\.?\s*de\s*C\.?\s*V\.?|
+     S\.?\s*A\.?\s*de\s*C\.?\s*V\.?|
+     S\.?\s*C\.?|
+     A\.?\s*C\.?
+    )\s*$
+    """
+)
+
+def _merge_corp_suffix(out: list[str]) -> list[str]:
+    merged = []
+    for item in out:
+        if merged and RE_CORP_SUFFIX_ONLY.fullmatch(item):
+            # une al anterior
+            merged[-1] = f"{merged[-1].rstrip(' ,')}, {item.strip(' ,')}"
+        else:
+            merged.append(item)
+    return merged
+
 _DASH = r"[-–—]"
 
 RE_EXP = re.compile(
@@ -643,7 +663,7 @@ def split_demandados_pdf(demandado_raw: str) -> List[str]:
             sp = _cut_alias_phrases_pdf(sp)
             sp = _clean_chunk(sp) if sp else ""
             sp = (sp or "").strip(" .,-;:")
-
+            sp = _cut_tail_non_name_pdf(sp)   # <-- NUEVO
             # ruido típico que queda suelto (n, l, el, de, etc.)
             if not sp or _RE_DEMANDADO_NOISE.match(sp):
                 continue
@@ -654,55 +674,36 @@ def split_demandados_pdf(demandado_raw: str) -> List[str]:
             if key not in seen:
                 seen.add(key)
                 out.append(sp)
-
+        out = _merge_corp_suffix(out)
     return out
 
+RE_DEMANDADO_TAIL_CUT_PDF = re.compile(
+    r"""(?ix)
+    \b(
+        Ejec\.?\s*Merc\.?(?:antil)?     |
+        Controv\.?                     |
+        Controversia(?:s)?             |
+        Arrend(?:\.|amiento)?          |
+        Ord\.?\s*Civil                 |
+        Oral(?:\s+Merc(?:antil)?)?     |
+        Cuad\.?\s*Amp\.?               |
+        Amparo                         |
+        T\.?\s*\d{1,6}                 |
+        \d{1,3}\s*Acdos?\.?            |
+        \d{1,3}\s*Acdo\.?              |
+        Acdos?\.?
+    )\b
+    """
+)
 
-    # Normaliza pegados: "yBravo" -> "y Bravo"
-    s = re.sub(r"(?i)\b([ye])(?=[A-ZÁÉÍÓÚÑ])", r"\1 ", s)
-
-    # Corta alias global
-    s = _cut_alias_phrases_pdf(s)
-
-    # Quita cola " y Otro(s)/Otra(s)/Otros"
-    s = re.sub(r"\s+(?:y|e)\s+otr[oa]s?\b\.?$", "", s, flags=re.IGNORECASE).strip()
-
-    # Coma separador de personas => ';'
-    s = _promote_party_commas_to_semicolon_pdf(s)
-
-    # Split fuerte por ';'
-    parts = [p.strip() for p in re.split(r"\s*;\s*", s) if p.strip()]
-
-    out: List[str] = []
-    seen = set()
-
-    for part in parts:
-        part = _cut_alias_phrases_pdf(part)
-        part = _join_dropped_initials_pdf(part).strip(" .,-;:")
-        if not part:
-            continue
-
-        # Split por ' y ' / ' e ' SOLO si lo que sigue parece iniciar un nombre/entidad
-        subparts = re.split(r"(?i)\s+(?:y|e)\s+(?=[\"“”A-ZÁÉÍÓÚÑ])", part)
-
-        for sp in subparts:
-            sp = _cut_alias_phrases_pdf(sp)
-            sp = _join_dropped_initials_pdf(sp)
-            sp = (_clean_chunk(sp) or "").strip(" .,-;:")
-
-            if not sp:
-                continue
-            if _RE_DEMANDADO_NOISE.match(sp):
-                continue
-            if _RE_OTRO_PDF.match(sp):
-                continue
-
-            key = sp.lower()
-            if key not in seen:
-                seen.add(key)
-                out.append(sp)
-
-    return out
+def _cut_tail_non_name_pdf(s: str) -> str:
+    s = (s or "").strip()
+    if not s:
+        return ""
+    m = RE_DEMANDADO_TAIL_CUT_PDF.search(s)
+    if m:
+        s = s[:m.start()].strip()
+    return s.strip(" .;,:-")
 
 def parse_arrendamiento_salas_block_v2(
     block: str,
