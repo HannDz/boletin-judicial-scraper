@@ -395,7 +395,7 @@ def _clean_actor_near_vs(actor_raw: str) -> str:
         picked.append(line)
 
     picked = list(reversed(picked)) if picked else [lines[-1]]
-    return _clean_chunk(" ".join(picked))
+    return _clean_chunk(limpiar_ruido_boletin(" ".join(picked)))
 
 def _case_end_from_vs(text: str, case_start: int, vs_start: int) -> int:
     # limita ventana para no irse al infinito
@@ -585,7 +585,14 @@ def _promote_party_commas_to_semicolon_pdf(s: str) -> str:
 
         # Si cerca del separador hay indicios corporativos, NO partir
         if _RE_CORP_HINT.search(prev) or re.match(
-            r"(?i)(?:S\.?\s*A\.?|C\.?\s*V\.?|INSTITUCI[OÓ]N|DIVISI[OÓ]N|SOFOM|BANCA|GRUPO)\b", nxt
+            r"(?i)(?:"
+            r"S\.?\s*A\.?|"
+            r"S\.?\s*de\s*R\.?\s*L\.?|"
+            r"S\.?\s*C\.?|"
+            r"C\.?\s*V\.?|"
+            r"INSTITUCI[OÓ]N|DIVISI[OÓ]N|SOFOM|BANCA|GRUPO"
+            r")\b",
+            nxt
         ):
             continue
 
@@ -595,18 +602,26 @@ def _promote_party_commas_to_semicolon_pdf(s: str) -> str:
 
     out.append(s[last:])
     return "".join(out)
+RE_CORP_SUFFIX_ONLY = re.compile(
+    r"""(?ix)^\s*
+    (S\.?\s*de\s*R\.?\s*L\.?\s*de\s*C\.?\s*V\.?|
+     S\.?\s*A\.?\s*de\s*C\.?\s*V\.?|
+     S\.?\s*C\.?|
+     A\.?\s*C\.?)
+    \s*$
+    """
+)
+
+def _merge_corp_suffix(out: list[str]) -> list[str]:
+    merged = []
+    for item in out:
+        if merged and RE_CORP_SUFFIX_ONLY.fullmatch(item):
+            merged[-1] = f"{merged[-1].rstrip(' ,')}, {item.strip(' ,')}"
+        else:
+            merged.append(item)
+    return merged
 
 def split_demandados_pdf(demandado_raw: str) -> List[str]:
-    """
-    Separa demandados (PDF) de forma robusta y compatible con tu extractor OCR:
-
-    - Corta alias: 'Quien también...', 'También conocido...', etc.
-    - Corrige OCR pegado: 'yBravo' -> 'y Bravo'
-    - Evita falsos splits por 'en/el' roto como 'e n e l' (bug por IGNORECASE en lookahead)
-    - Separa por ';' y por 'y/e' SOLO cuando el siguiente token parece iniciar un nombre/entidad (mayúscula/“comillas”)
-    - Convierte comas a ';' solo cuando la coma realmente separa demandados (no corporativos)
-    - Elimina 'y Otro(s)/Otra(s)' al final
-    """
     s = _clean_chunk(demandado_raw) if demandado_raw else ""
     s = (s or "").strip()
     if not s:
@@ -615,66 +630,55 @@ def split_demandados_pdf(demandado_raw: str) -> List[str]:
     # 1) Alias / también conocido
     s = _cut_alias_phrases_pdf(s)
 
-    # 2) Reparar OCR pegado: "yBravo" -> "y Bravo" (y también "eEmpresa" -> "e Empresa")
+    # 2) Reparar OCR pegado: "yBravo" -> "y Bravo"
     s = re.sub(r"(?i)\b([ye])(?=[A-ZÁÉÍÓÚÑ])", r"\1 ", s)
 
     # 3) 'y Otros/Otras' al final no es un demandado
     s = re.sub(r"\s+(?:y|e)\s+otr[oa]s?\b\.?$", "", s, flags=re.IGNORECASE).strip()
 
-    # 4) Unir inicial perdida: "E varisto" -> "Evaristo" (evita que luego se dropee la 'E')
+    # 4) Unir inicial perdida
     s = _join_dropped_initials_pdf(s)
 
-    # 5) Arreglos mínimos de stopwords rotos típicos: "e n e l" -> "en el", "e l" -> "el"
-    #    (esto reduce ruido y evita que el split por 'e' se dispare)
+    # 5) Stopwords rotos típicos
     s = re.sub(r"(?i)\be\s+n\s+e\s+l\b", "en el", s)
     s = re.sub(r"(?i)\be\s+l\b", "el", s)
     s = re.sub(r"(?i)\be\s+n\b", "en", s)
 
-    # 6) Si parece corporativo, recorta colas de fideicomiso/fiduciario (no son 'otro demandado')
-    if re.search(r"(?i)\b(S\.?\s*A\.?|S\.?\s*de\s*C\.?V\.?|C\.?V\.?|Banco|Instituci[oó]n|Sofom|Fiduciari[ao]|Divisi[oó]n\s+Fiduciaria)\b", s):
-        m_tail = re.search(
-            r"(?i)\b(?:como\s+fiduciari[ao]|en\s+el\s+fideicomiso|fideicomiso\s+identificado|identificado\s+con|identificado\s+como|con\s+el\s+n[uú]mero|n[uú]mero\s+[A-Z0-9/.-]{2,})\b",
-            s,
-        )
-        if m_tail:
-            s = s[:m_tail.start()].strip(" ,.;:-")
-
-    # 7) Comas que realmente separan demandados -> ';'
+    # 6) Comas que separan demandados -> ';'
     s = _promote_party_commas_to_semicolon_pdf(s)
 
-    # 8) Split fuerte por ';'
+    # 7) Split fuerte por ';'
     parts = [p.strip() for p in re.split(r"\s*;\s*", s) if p.strip()]
 
     out: List[str] = []
     seen = set()
 
     for part in parts:
-        part = _cut_alias_phrases_pdf(part)
-        part = part.strip(" .,-;:")
-
+        part = _cut_alias_phrases_pdf(part).strip(" .,-;:")
         if not part:
             continue
 
-        # ✅ Split por ' y ' / ' e ' SOLO si lo que sigue parece iniciar un nombre/entidad.
-        # Importante: el lookahead debe ser *case-sensitive*; por eso NO usamos (?i) global.
+        # Split por 'y/e' SOLO si lo que sigue parece iniciar nombre/entidad
         subparts = re.split(r"\s+(?i:(?:y|e))\s+(?=[\"“”A-ZÁÉÍÓÚÑ])", part)
 
         for sp in subparts:
             sp = _cut_alias_phrases_pdf(sp)
             sp = _clean_chunk(sp) if sp else ""
             sp = (sp or "").strip(" .,-;:")
-            sp = _cut_tail_non_name_pdf(sp)   # <-- NUEVO
-            # ruido típico que queda suelto (n, l, el, de, etc.)
+
+            sp = _cut_tail_non_name_pdf(sp)
+
             if not sp or _RE_DEMANDADO_NOISE.match(sp):
                 continue
-            if _RE_OTRO.match(sp):
+            if _RE_OTRO_PDF.match(sp):
                 continue
 
             key = sp.lower()
             if key not in seen:
                 seen.add(key)
                 out.append(sp)
-        out = _merge_corp_suffix(out)
+
+    out = _merge_corp_suffix(out)
     return out
 
 RE_DEMANDADO_TAIL_CUT_PDF = re.compile(
@@ -691,6 +695,15 @@ RE_DEMANDADO_TAIL_CUT_PDF = re.compile(
         T\.?\s*\d{1,6}                 |
         \d{1,3}\s*Acdos?\.?            |
         \d{1,3}\s*Acdo\.?              |
+        Especial                       |
+        Hipotecari[oa]                 |
+        Proced\.?                      |
+        Convencional                   |
+        Civil                          |
+        Mercantil                      |
+        Prev                           |
+        Admis[ií]on                    |
+        Secreto                        |
         Acdos?\.?
     )\b
     """
@@ -705,6 +718,41 @@ def _cut_tail_non_name_pdf(s: str) -> str:
         s = s[:m.start()].strip()
     return s.strip(" .;,:-")
 
+def _drop_base_when_seq_exists(exps: List[str]) -> List[str]:
+    bases = set()
+    for e in exps:
+        m = re.search(r"(?i)\bT\.\s*(\d+)[-/](\d{4})[-/](\d{1,3})\b", e)
+        if m:
+            bases.add((m.group(1), m.group(2)))
+
+    out = []
+    for e in exps:
+        m_base = re.search(r"(?i)\bT\.\s*(\d+)[-/](\d{4})\b(?!\s*[-/]\s*\d)", e)
+        if m_base and (m_base.group(1), m_base.group(2)) in bases:
+            continue
+        out.append(e)
+    return out
+
+RE_T_Y_SEQ = re.compile(r"(?ix)\bT\.\s*(\d+)[-/]\s*(\d{4})[-/]\s*(\d{1,3})\s*y\s*(\d{1,3})\b")
+
+def _expand_t_y(exps: List[str]) -> List[str]:
+    out = []
+    for e in exps:
+        m = RE_T_Y_SEQ.search(e)
+        if m:
+            num, anio, a, b = m.group(1), m.group(2), int(m.group(3)), int(m.group(4))
+            out.append(f"T. {num}-{anio}-{str(a).zfill(3)}")
+            out.append(f"T. {num}-{anio}-{str(b).zfill(3)}")
+        else:
+            out.append(e)
+
+    seen=set(); res=[]
+    for x in out:
+        k=x.lower()
+        if k not in seen:
+            seen.add(k); res.append(x)
+    return res
+
 def parse_arrendamiento_salas_block_v2(
     block: str,
     fecha_pub: str,
@@ -713,6 +761,7 @@ def parse_arrendamiento_salas_block_v2(
 ) -> List[Dict]:
 
     text = _normalize_keep_newlines(block)
+    text = limpiar_ruido_boletin(text)          # ✅ NUEVO: quita PAGINA/SOLO CONSULTA/BOLETIN
     text = unir_expedientes_partidos(text)
     if not text:
         return []
@@ -731,7 +780,7 @@ def parse_arrendamiento_salas_block_v2(
 
     resultados: List[Dict] = []
     seen = set()
-
+    case_seen = set()
     vs_all = list(RE_VS.finditer(text))
     if not vs_all:
         return []
@@ -750,6 +799,17 @@ def parse_arrendamiento_salas_block_v2(
         vs_m = vs_all[j]
         case_start = _case_start_before_vs(text, vs_m.start())
         case_end = vs_all[j + 1].start() if (j + 1) < len(vs_all) else len(text)
+        case_key = (case_start, vs_m.start(), case_end)
+        if case_key in case_seen:
+            continue
+        case_seen.add(case_key)
+
+        # usar el PRIMER tipo dentro del caso (evita repeticiones por cada "Controv. Arrend.")
+        tipo_first = RE_TIPO.search(text, vs_m.end(), case_end)
+        if not tipo_first:
+            continue
+        tipo_m = tipo_first
+        tipo_pos = tipo_m.start()
 
         if not (case_start <= tipo_pos < case_end):
             continue
@@ -793,6 +853,7 @@ def parse_arrendamiento_salas_block_v2(
         seg = text[tipo_pos:line_end]
 
         expedientes = _extract_expedientes_sala(seg)
+        expedientes = _drop_base_when_seq_exists(expedientes)
         if not expedientes:
             # fallback: intenta buscar Num Exp en una ventana corta adicional (por si quedó aún después)
             seg_fallback = text[tipo_pos:min(tipo_pos + 2500, case_end)]
@@ -811,7 +872,7 @@ def parse_arrendamiento_salas_block_v2(
             if m_acdo:
                 num_estatus = int(m_acdo.group(1))
                 estatus = "Acdo"
-
+        expedientes = _expand_t_y(expedientes)
         for exp in expedientes:
             for idx_dem, dem in enumerate(demandados, start=1):
                 reg = {
