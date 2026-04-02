@@ -1,0 +1,78 @@
+name: Build macOS executables
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip setuptools wheel
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build boletin_scraper (mac)
+        run: |
+          pyinstaller --onefile --name boletin_scraper main.py
+
+      - name: Build ocr_worker (mac) if present
+        run: |
+          if [ -f "ocr_worker.py" ]; then
+            pyinstaller --onefile --name ocr_worker ocr_worker.py
+          else
+            echo "ocr_worker.py no existe, omitiendo build del worker."
+          fi
+
+      - name: Package release folder (include Tesseract for mac)
+        run: |
+          rm -rf release
+          mkdir -p release/logs release/tmp release/tesseract/tessdata
+
+          # Copiar binarios generados
+          cp dist/boletin_scraper release/
+          if [ -f "dist/ocr_worker" ]; then
+            cp dist/ocr_worker release/
+          fi
+
+          # Copiar config (si existe)
+          if [ -f "config.env" ]; then
+            cp config.env release/
+          fi
+
+          # Copiar tesseract embebido desde el repo
+          if [ -f "tesseract/mac/tesseract" ]; then
+            cp tesseract/mac/tesseract release/tesseract/tesseract
+            chmod +x release/tesseract/tesseract
+          else
+            echo "Falta tesseract/mac/tesseract en el repo. No se incluyó Tesseract."
+          fi
+
+          if [ -d "tesseract/mac/tessdata" ]; then
+            cp -R tesseract/mac/tessdata/* release/tesseract/tessdata/ || true
+          else
+            echo "Falta tesseract/mac/tessdata en el repo. No se incluyó tessdata."
+          fi
+
+          # Permisos del ejecutable
+          chmod +x release/boletin_scraper
+          if [ -f "release/ocr_worker" ]; then
+            chmod +x release/ocr_worker
+          fi
+          if [ -f "README_USUARIO.txt" ]; then cp README_USUARIO.txt release/; fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BoletinScraper-macOS
+          path: release
