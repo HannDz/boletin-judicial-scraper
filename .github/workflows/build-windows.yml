@@ -33,12 +33,31 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
-          Copy-Item dist\boletin_scraper.exe release\
-          Copy-Item dist\ocr_worker.exe release\
-          if (Test-Path config.env) { Copy-Item config.env release\ }
+
+          # Binarios
+          Copy-Item dist\boletin_scraper.exe release\ -Force
+          Copy-Item dist\ocr_worker.exe release\ -Force
+
+          # Config
+          if (Test-Path config.env) { Copy-Item config.env release\ -Force }
+
+          # README
+          if (Test-Path README_USUARIO.txt) { Copy-Item README_USUARIO.txt release\ -Force }
+
+          # Carpetas vacías
           New-Item -ItemType Directory -Force -Path release\logs | Out-Null
           New-Item -ItemType Directory -Force -Path release\tmp  | Out-Null
 
+          # Tesseract embebido (Windows)
+          if (Test-Path tesseract\windows\tesseract.exe) {
+            New-Item -ItemType Directory -Force -Path release\tesseract | Out-Null
+            Copy-Item tesseract\windows\tesseract.exe release\tesseract\tesseract.exe -Force
+            if (Test-Path tesseract\windows\tessdata) {
+              Copy-Item tesseract\windows\tessdata release\tesseract\tessdata -Recurse -Force
+            }
+          } else {
+            Write-Host "WARNING: No existe tesseract\windows\tesseract.exe en el repo. No se incluyó Tesseract."
+          }
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

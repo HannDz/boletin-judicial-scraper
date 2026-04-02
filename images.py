@@ -11,6 +11,8 @@ import sys
 from datetime import datetime
 from configuration import settings
 from pathlib import Path
+from tesseract_runtime import configure_tesseract_if_bundled
+configure_tesseract_if_bundled()
 
 def _worker_exists() -> bool:
     base = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
