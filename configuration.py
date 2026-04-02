@@ -1,17 +1,16 @@
-# configuration.py
-import os
+import os, sys
 from pathlib import Path
 from dotenv import load_dotenv
 from dataclasses import dataclass
 
-BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_ENV = BASE_DIR / "config.env"
+def app_dir() -> Path:
+    return Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 
-env_from_var = os.getenv("ENV_PATH")
-ENV_PATH = Path(env_from_var).expanduser() if env_from_var else DEFAULT_ENV
+APP_DIR = app_dir()
+ENV_PATH = Path(os.environ.get("ENV_PATH", str(APP_DIR / "config.env"))).expanduser()
 
 if not ENV_PATH.exists():
-    raise FileNotFoundError(f"No existe el archivo .env en: {ENV_PATH}")
+    raise FileNotFoundError(f"No existe el archivo de configuración: {ENV_PATH}")
 
 load_dotenv(dotenv_path=ENV_PATH, override=True)
 
