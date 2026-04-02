@@ -7,8 +7,15 @@ import time
 import random
 import requests
 import json
+import sys
 from datetime import datetime
 from configuration import settings
+from pathlib import Path
+
+def _worker_exists() -> bool:
+    base = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+    worker = base / ("ocr_worker.exe" if sys.platform.startswith("win") else "ocr_worker")
+    return worker.exists()
 
 def descargar_imagen(session, url_img, path, intentos=3, timeout=(10, 60), log_path="errores_imagenes.txt"):
     last_err = None
@@ -43,7 +50,12 @@ def procesar_pagina(session, url_img, idx):
 
     descargar_imagen(session, url_img, path)
     img = preprocesar_imagen(path, settings.is_debbug)
-    texto = ocr_imagen(img)
+
+    if _worker_exists():
+        from ocr_bridge import ocr_with_worker
+        texto = ocr_with_worker(path)  # el worker lee la imagen del disco y usa TU OCR probado
+    else:
+        texto = ocr_imagen(img)
 
     try:
         os.remove(path)
