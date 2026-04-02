@@ -69,7 +69,9 @@ jobs:
           if [ -f "release/ocr_worker" ]; then
             chmod +x release/ocr_worker
           fi
-          if [ -f "README_USUARIO.txt" ]; then cp README_USUARIO.txt release/; fi
+          if [ -f "README_USUARIO.txt" ]; then 
+            cp README_USUARIO.txt release/; 
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
