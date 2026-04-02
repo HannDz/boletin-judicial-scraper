@@ -184,10 +184,13 @@ for fecha, l in externos:
         # Guardar revisión incremental (NO debe tronar)
         # =============================
         try:
-            fecha_string = fecha.isoformat()
-            ruta_salida = f"revision_boletin{fecha_string}.txt"
-            for idx, t in enumerate(textos, start=1):
-                guardar_texto_incremental(ruta_salida, t, idx)
+            if (settings.is_debbug or "").strip().lower() == "true":
+                fecha_string = fecha.isoformat()
+                ruta_salida = f"revision_boletin{fecha_string}.txt"
+                for idx, t in enumerate(textos, start=1):
+                    guardar_texto_incremental(ruta_salida, t, idx)
+            else:
+                print("Debug desactivado")
         except Exception as e_rev:
             log_error_boletin(fecha, l, "Guardar revisión incremental", e_rev)
 

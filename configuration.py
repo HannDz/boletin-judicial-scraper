@@ -1,19 +1,19 @@
+# configuration.py
 import os
-from dataclasses import dataclass
-from dotenv import load_dotenv
 from pathlib import Path
-
-# Busca .env relativo a ESTE archivo (configuration.py), no al cwd
+from dotenv import load_dotenv
+from dataclasses import dataclass
 
 BASE_DIR = Path(__file__).resolve().parent
-ENV_PATH = BASE_DIR / "config.env"
+DEFAULT_ENV = BASE_DIR / "config.env"
+
+env_from_var = os.getenv("ENV_PATH")
+ENV_PATH = Path(env_from_var).expanduser() if env_from_var else DEFAULT_ENV
 
 if not ENV_PATH.exists():
     raise FileNotFoundError(f"No existe el archivo .env en: {ENV_PATH}")
 
-load_dotenv(dotenv_path=ENV_PATH)
-# Carga .env automáticamente (si existe)
-#load_dotenv()
+load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 def get_env(key: str, default: str | None = None, *, required: bool = False) -> str | None:
     val = os.getenv(key, default)
@@ -47,7 +47,7 @@ class Settings:
     url_boletin_filtro:str
     fecha_ini:str
     fecha_fin:str
-    is_debbug:bool
+    is_debbug:str
     log_dir:str
     log_file:str
 
@@ -66,7 +66,7 @@ def load_settings() -> Settings:
         url_boletin_filtro=get_env("URL_BOLETIN_FILTRO", "") or "",
         fecha_ini=get_env("FILTRADO_INI","") or "",
         fecha_fin=get_env("FILTRADO_FIN","") or "",
-        is_debbug=get_env("ISDEBBUG",False) or False,
+        is_debbug=get_env("ISDEBBUG", "false") or "false",
         log_dir=get_env("LOG_DIR","") or "logs",
         log_file=get_env("LOG_FILE","") or "errores_boletin.log",
     )
