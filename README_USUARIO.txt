@@ -20,6 +20,7 @@ Contenido de esta carpeta
 - El programa siempre toma el config.env que está en esta misma carpeta.
 
 2) Cómo ejecutar (manual)
+En terminal se debe ejecutar al nivel de carpeta "xattr -dr com.apple.quarantine" para dar permisos, 
 Opción A - Finder
 - Clic derecho sobre "boletin_scraper" -> Abrir
 - Si macOS lo bloquea:
