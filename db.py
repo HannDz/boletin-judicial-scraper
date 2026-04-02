@@ -2,7 +2,13 @@ from __future__ import annotations
 from urllib.parse import quote_plus
 from sqlalchemy import create_engine
 from configuration import settings
+from sqlalchemy import text
 
+def test_connection(engine):
+    with engine.connect() as conn:
+        dbname = conn.execute(text("select current_database()")).scalar()
+        who = conn.execute(text("select current_user")).scalar()
+        return dbname, who
 
 def build_database_url() -> str:
     backend = settings.db_backend.lower()

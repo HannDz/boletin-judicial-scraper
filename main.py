@@ -25,6 +25,17 @@ def run_once():
     LOG_DIR.mkdir(exist_ok=True)
     LOG_FILE = LOG_DIR / settings.log_file
 
+    def log_info(evento: str, data: dict | None = None):
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        payload = {"timestamp": ts, "level": "INFO", "evento": evento}
+        if data:
+            payload["data"] = data
+
+        # Asegura carpeta logs exista
+        LOG_DIR.mkdir(exist_ok=True)
+
+        with LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def log_error_boletin(
         fecha_boletin: date,
@@ -126,10 +137,12 @@ def run_once():
                             )
                         else:
                             texto = ""
-
+                        
                         textos.append(texto)
                         contador += 1
-
+                        if (settings.is_debbug or "").strip().lower() == "true":
+                            if contador == 50:
+                                break
                     except Exception as e_page:
                         log_error_boletin(
                             fecha, l, f"OCR página {contador}", e_page,
@@ -198,6 +211,11 @@ def run_once():
             # Insertar en BD (NO debe tronar)
             # =============================
             try:
+                try:
+                    dbname, who = test_connection(engine)
+                    log_info("db_conexion_ok", {"dbname": dbname, "user": who})
+                except Exception as e:
+                    log_error_boletin(fecha, l, "db_conexion_fallo", e)
                 # ✅ condición correcta
                 if expedientes is not None and len(expedientes) > 0:
                     cantidad_insercion = insertar_expedientes_bulk(expedientes)

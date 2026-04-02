@@ -71,3 +71,11 @@ def load_settings() -> Settings:
     )
 
 settings = load_settings()
+
+base = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+log = base / "logs" / "env_debug.txt"
+log.parent.mkdir(exist_ok=True)
+with log.open("a", encoding="utf-8") as f:
+    f.write(f"frozen={getattr(sys,'frozen',False)}\n")
+    f.write(f"base={base}\n")
+    f.write(f"ENV_PATH={ENV_PATH}\n\n")
