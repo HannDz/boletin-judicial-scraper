@@ -10,11 +10,6 @@ import json
 from datetime import datetime
 from configuration import settings
 
-def log_error_imagen(path_txt: str, url: str, path_img: str, err: str):
-    os.makedirs(os.path.dirname(path_txt) or ".", exist_ok=True)
-    with open(path_txt, "a", encoding="utf-8") as f:
-        f.write(f"URL: {url}\nPATH: {path_img}\nERROR: {err}\n{'-'*80}\n")
-
 def descargar_imagen(session, url_img, path, intentos=3, timeout=(10, 60), log_path="errores_imagenes.txt"):
     last_err = None
 

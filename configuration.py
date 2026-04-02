@@ -48,6 +48,8 @@ class Settings:
     fecha_ini:str
     fecha_fin:str
     is_debbug:bool
+    log_dir:str
+    log_file:str
 
 def load_settings() -> Settings:
     return Settings(
@@ -65,6 +67,8 @@ def load_settings() -> Settings:
         fecha_ini=get_env("FILTRADO_INI","") or "",
         fecha_fin=get_env("FILTRADO_FIN","") or "",
         is_debbug=get_env("ISDEBBUG",False) or False,
+        log_dir=get_env("LOG_DIR","") or "logs",
+        log_file=get_env("LOG_FILE","") or "errores_boletin.log",
     )
 
 settings = load_settings()

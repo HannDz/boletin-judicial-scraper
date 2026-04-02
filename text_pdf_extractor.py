@@ -761,7 +761,7 @@ def parse_arrendamiento_salas_block_v2(
 ) -> List[Dict]:
 
     text = _normalize_keep_newlines(block)
-    text = limpiar_ruido_boletin(text)          # ✅ NUEVO: quita PAGINA/SOLO CONSULTA/BOLETIN
+    text = limpiar_ruido_boletin(text) 
     text = unir_expedientes_partidos(text)
     if not text:
         return []
@@ -831,21 +831,9 @@ def parse_arrendamiento_salas_block_v2(
         # sala/pagina por posición del tipo
         pagina_caso = _pagina_para_pos(text, tipo_pos)
         sala_civil = _sala_civil_para_pos(text, tipo_pos)
-
-        # Segmento “línea” del tipo hasta el primer estatus (o ventana corta)
-
-        # st = RE_STATUS.search(text, tipo_pos, case_end)
-        # line_end = st.end() if st else min(tipo_pos + 900, case_end)
-        # seg = text[tipo_pos:line_end]
-
-        # # expedientes SOLO de esta línea
-        # expedientes = _extract_expedientes_sala(seg)
-        # if not expedientes:
-        #     continue
         st = RE_STATUS.search(text, tipo_pos, case_end)
 
         if st:
-            # incluye un “buffer” después del estatus para alcanzar "Núm. Exp."
             line_end = min(st.end() + 600, case_end)
         else:
             line_end = min(tipo_pos + 1400, case_end)
@@ -855,7 +843,6 @@ def parse_arrendamiento_salas_block_v2(
         expedientes = _extract_expedientes_sala(seg)
         expedientes = _drop_base_when_seq_exists(expedientes)
         if not expedientes:
-            # fallback: intenta buscar Num Exp en una ventana corta adicional (por si quedó aún después)
             seg_fallback = text[tipo_pos:min(tipo_pos + 2500, case_end)]
             expedientes = _extract_expedientes_sala(seg_fallback)
 
@@ -900,7 +887,6 @@ def parse_arrendamiento_salas_block_v2(
                 if key not in seen:
                     seen.add(key)
                     resultados.append(reg)
-
     return resultados
 
 def extraer_texto_pypdf_con_paginas(pdf_path: str) -> str:
